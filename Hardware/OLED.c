@@ -1,0 +1,433 @@
+#include "main.h"
+#include "OLED.h"
+
+/* =================================================
+ * 软件I2C引脚定义:
+ *   SCL = PD10
+ *   SDA = PD8
+ * 引脚已在 gpio.c 中配置为开漏输出+上拉,
+ * 写1时引脚释放(被上拉电阻拉高), 写0时引脚拉低,
+ * 这正是I2C总线需要的"开漏"特性。
+ * ================================================= */
+#define OLED_SCL_PORT   GPIOD
+#define OLED_SCL_PIN    GPIO_PIN_10
+#define OLED_SDA_PORT   GPIOD
+#define OLED_SDA_PIN    GPIO_PIN_8
+
+#define OLED_SCL_H()    HAL_GPIO_WritePin(OLED_SCL_PORT, OLED_SCL_PIN, GPIO_PIN_SET)
+#define OLED_SCL_L()    HAL_GPIO_WritePin(OLED_SCL_PORT, OLED_SCL_PIN, GPIO_PIN_RESET)
+#define OLED_SDA_H()    HAL_GPIO_WritePin(OLED_SDA_PORT, OLED_SDA_PIN, GPIO_PIN_SET)
+#define OLED_SDA_L()    HAL_GPIO_WritePin(OLED_SDA_PORT, OLED_SDA_PIN, GPIO_PIN_RESET)
+
+/* SSD1306的I2C写地址(7位地址0x3C左移1位) */
+#define OLED_ADDR       0x78
+
+/* 显存: 128列 x 8页, 每页8个像素点, 共128x64像素 */
+static uint8_t OLED_Buffer[128 * 8];
+
+/* ---------------- 6x8 ASCII 字库(空格~z) ---------------- */
+static const uint8_t OLED_F6x8[][6] = {
+    {0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, /* 空格 */
+    {0x00, 0x00, 0x00, 0x2F, 0x00, 0x00}, /* ! */
+    {0x00, 0x00, 0x07, 0x00, 0x07, 0x00}, /* " */
+    {0x00, 0x14, 0x7F, 0x14, 0x7F, 0x14}, /* # */
+    {0x00, 0x24, 0x2A, 0x7F, 0x2A, 0x12}, /* $ */
+    {0x00, 0x62, 0x64, 0x08, 0x13, 0x23}, /* % */
+    {0x00, 0x36, 0x49, 0x55, 0x22, 0x50}, /* & */
+    {0x00, 0x00, 0x05, 0x03, 0x00, 0x00}, /* ' */
+    {0x00, 0x00, 0x1C, 0x22, 0x41, 0x00}, /* ( */
+    {0x00, 0x00, 0x41, 0x22, 0x1C, 0x00}, /* ) */
+    {0x00, 0x14, 0x08, 0x3E, 0x08, 0x14}, /* * */
+    {0x00, 0x08, 0x08, 0x3E, 0x08, 0x08}, /* + */
+    {0x00, 0x00, 0x00, 0xA0, 0x60, 0x00}, /* , */
+    {0x00, 0x08, 0x08, 0x08, 0x08, 0x08}, /* - */
+    {0x00, 0x00, 0x60, 0x60, 0x00, 0x00}, /* . */
+    {0x00, 0x20, 0x10, 0x08, 0x04, 0x02}, /* / */
+    {0x00, 0x3E, 0x51, 0x49, 0x45, 0x3E}, /* 0 */
+    {0x00, 0x00, 0x42, 0x7F, 0x40, 0x00}, /* 1 */
+    {0x00, 0x42, 0x61, 0x51, 0x49, 0x46}, /* 2 */
+    {0x00, 0x21, 0x41, 0x45, 0x4B, 0x31}, /* 3 */
+    {0x00, 0x18, 0x14, 0x12, 0x7F, 0x10}, /* 4 */
+    {0x00, 0x27, 0x45, 0x45, 0x45, 0x39}, /* 5 */
+    {0x00, 0x3C, 0x4A, 0x49, 0x49, 0x30}, /* 6 */
+    {0x00, 0x01, 0x71, 0x09, 0x05, 0x03}, /* 7 */
+    {0x00, 0x36, 0x49, 0x49, 0x49, 0x36}, /* 8 */
+    {0x00, 0x06, 0x49, 0x49, 0x29, 0x1E}, /* 9 */
+    {0x00, 0x00, 0x36, 0x36, 0x00, 0x00}, /* : */
+    {0x00, 0x00, 0x56, 0x36, 0x00, 0x00}, /* ; */
+    {0x00, 0x08, 0x14, 0x22, 0x41, 0x00}, /* < */
+    {0x00, 0x14, 0x14, 0x14, 0x14, 0x14}, /* = */
+    {0x00, 0x00, 0x41, 0x22, 0x14, 0x08}, /* > */
+    {0x00, 0x02, 0x01, 0x51, 0x09, 0x06}, /* ? */
+    {0x00, 0x32, 0x49, 0x59, 0x51, 0x3E}, /* @ */
+    {0x00, 0x7C, 0x12, 0x11, 0x12, 0x7C}, /* A */
+    {0x00, 0x7F, 0x49, 0x49, 0x49, 0x36}, /* B */
+    {0x00, 0x3E, 0x41, 0x41, 0x41, 0x22}, /* C */
+    {0x00, 0x7F, 0x41, 0x41, 0x22, 0x1C}, /* D */
+    {0x00, 0x7F, 0x49, 0x49, 0x49, 0x41}, /* E */
+    {0x00, 0x7F, 0x09, 0x09, 0x09, 0x01}, /* F */
+    {0x00, 0x3E, 0x41, 0x49, 0x49, 0x7A}, /* G */
+    {0x00, 0x7F, 0x08, 0x08, 0x08, 0x7F}, /* H */
+    {0x00, 0x00, 0x41, 0x7F, 0x41, 0x00}, /* I */
+    {0x00, 0x20, 0x40, 0x41, 0x3F, 0x01}, /* J */
+    {0x00, 0x7F, 0x08, 0x14, 0x22, 0x41}, /* K */
+    {0x00, 0x7F, 0x40, 0x40, 0x40, 0x40}, /* L */
+    {0x00, 0x7F, 0x02, 0x0C, 0x02, 0x7F}, /* M */
+    {0x00, 0x7F, 0x04, 0x08, 0x10, 0x7F}, /* N */
+    {0x00, 0x3E, 0x41, 0x41, 0x41, 0x3E}, /* O */
+    {0x00, 0x7F, 0x09, 0x09, 0x09, 0x06}, /* P */
+    {0x00, 0x3E, 0x41, 0x51, 0x21, 0x5E}, /* Q */
+    {0x00, 0x7F, 0x09, 0x19, 0x29, 0x46}, /* R */
+    {0x00, 0x46, 0x49, 0x49, 0x49, 0x31}, /* S */
+    {0x00, 0x01, 0x01, 0x7F, 0x01, 0x01}, /* T */
+    {0x00, 0x3F, 0x40, 0x40, 0x40, 0x3F}, /* U */
+    {0x00, 0x1F, 0x20, 0x40, 0x20, 0x1F}, /* V */
+    {0x00, 0x3F, 0x40, 0x38, 0x40, 0x3F}, /* W */
+    {0x00, 0x63, 0x14, 0x08, 0x14, 0x63}, /* X */
+    {0x00, 0x07, 0x08, 0x70, 0x08, 0x07}, /* Y */
+    {0x00, 0x61, 0x51, 0x49, 0x45, 0x43}, /* Z */
+    {0x00, 0x00, 0x7F, 0x41, 0x41, 0x00}, /* [ */
+    {0x00, 0x02, 0x04, 0x08, 0x10, 0x20}, /* \ */
+    {0x00, 0x00, 0x41, 0x41, 0x7F, 0x00}, /* ] */
+    {0x00, 0x04, 0x02, 0x01, 0x02, 0x04}, /* ^ */
+    {0x00, 0x40, 0x40, 0x40, 0x40, 0x40}, /* _ */
+    {0x00, 0x00, 0x01, 0x02, 0x04, 0x00}, /* ` */
+    {0x00, 0x20, 0x54, 0x54, 0x54, 0x78}, /* a */
+    {0x00, 0x7F, 0x48, 0x44, 0x44, 0x38}, /* b */
+    {0x00, 0x38, 0x44, 0x44, 0x44, 0x20}, /* c */
+    {0x00, 0x38, 0x44, 0x44, 0x48, 0x7F}, /* d */
+    {0x00, 0x38, 0x54, 0x54, 0x54, 0x18}, /* e */
+    {0x00, 0x08, 0x7E, 0x09, 0x01, 0x02}, /* f */
+    {0x00, 0x18, 0xA4, 0xA4, 0xA4, 0x7C}, /* g */
+    {0x00, 0x7F, 0x08, 0x04, 0x04, 0x78}, /* h */
+    {0x00, 0x00, 0x44, 0x7D, 0x40, 0x00}, /* i */
+    {0x00, 0x40, 0x80, 0x84, 0x7D, 0x00}, /* j */
+    {0x00, 0x7F, 0x10, 0x28, 0x44, 0x00}, /* k */
+    {0x00, 0x00, 0x41, 0x7F, 0x40, 0x00}, /* l */
+    {0x00, 0x7C, 0x04, 0x18, 0x04, 0x78}, /* m */
+    {0x00, 0x7C, 0x08, 0x04, 0x04, 0x78}, /* n */
+    {0x00, 0x38, 0x44, 0x44, 0x44, 0x38}, /* o */
+    {0x00, 0xFC, 0x24, 0x24, 0x24, 0x18}, /* p */
+    {0x00, 0x18, 0x24, 0x24, 0x18, 0xFC}, /* q */
+    {0x00, 0x7C, 0x08, 0x04, 0x04, 0x08}, /* r */
+    {0x00, 0x48, 0x54, 0x54, 0x54, 0x20}, /* s */
+    {0x00, 0x04, 0x3F, 0x44, 0x40, 0x20}, /* t */
+    {0x00, 0x3C, 0x40, 0x40, 0x20, 0x7C}, /* u */
+    {0x00, 0x1C, 0x20, 0x40, 0x20, 0x1C}, /* v */
+    {0x00, 0x3C, 0x40, 0x30, 0x40, 0x3C}, /* w */
+    {0x00, 0x44, 0x28, 0x10, 0x28, 0x44}, /* x */
+    {0x00, 0x1C, 0xA0, 0x40, 0x20, 0x1C}, /* y */
+    {0x00, 0x44, 0x64, 0x54, 0x4C, 0x44}, /* z */
+    {0x00, 0x08, 0x36, 0x41, 0x00, 0x00}, /* { */
+    {0x00, 0x00, 0x7F, 0x00, 0x00, 0x00}, /* | */
+    {0x00, 0x00, 0x41, 0x36, 0x08, 0x00}, /* } */
+    {0x00, 0x08, 0x04, 0x08, 0x10, 0x08}, /* ~ */
+};
+
+/* ---------------- 软件I2C底层 ---------------- */
+
+/* 简单延时, 控制I2C时钟频率(约100kHz以内) */
+static void OLED_I2C_Delay(void)
+{
+    volatile uint8_t i;
+    for (i = 0; i < 10; i++)
+    {
+        ;
+    }
+}
+
+/* I2C起始信号: SCL高电平期间, SDA由高变低 */
+static void OLED_I2C_Start(void)
+{
+    OLED_SDA_H();
+    OLED_SCL_H();
+    OLED_I2C_Delay();
+    OLED_SDA_L();
+    OLED_I2C_Delay();
+    OLED_SCL_L();
+}
+
+/* I2C停止信号: SCL高电平期间, SDA由低变高 */
+static void OLED_I2C_Stop(void)
+{
+    OLED_SDA_L();
+    OLED_SCL_H();
+    OLED_I2C_Delay();
+    OLED_SDA_H();
+    OLED_I2C_Delay();
+}
+
+/* 发送一个字节, 高位在前。
+ * SSD1306作为从机只收不发, ACK应答位这里直接跳过。 */
+static void OLED_I2C_SendByte(uint8_t byte)
+{
+    uint8_t i;
+
+    for (i = 0; i < 8; i++)
+    {
+        if (byte & 0x80)
+        {
+            OLED_SDA_H();
+        }
+        else
+        {
+            OLED_SDA_L();
+        }
+        byte <<= 1;
+
+        OLED_I2C_Delay();
+        OLED_SCL_H();       /* SCL上升沿, 从机读取SDA */
+        OLED_I2C_Delay();
+        OLED_SCL_L();
+    }
+
+    /* 跳过ACK: 释放SDA, 空拍一个时钟 */
+    OLED_SDA_H();
+    OLED_I2C_Delay();
+    OLED_SCL_H();
+    OLED_I2C_Delay();
+    OLED_SCL_L();
+}
+
+/* 向SSD1306写一条命令(控制字节0x00) */
+static void OLED_WriteCmd(uint8_t cmd)
+{
+    OLED_I2C_Start();
+    OLED_I2C_SendByte(OLED_ADDR);   /* 器件地址(写) */
+    OLED_I2C_SendByte(0x00);        /* 控制字节: 后面是命令 */
+    OLED_I2C_SendByte(cmd);
+    OLED_I2C_Stop();
+}
+
+/* 向SSD1306写一个显示数据(控制字节0x40) */
+static void OLED_WriteData(uint8_t data)
+{
+    OLED_I2C_Start();
+    OLED_I2C_SendByte(OLED_ADDR);   /* 器件地址(写) */
+    OLED_I2C_SendByte(0x40);        /* 控制字节: 后面是显存数据 */
+    OLED_I2C_SendByte(data);
+    OLED_I2C_Stop();
+}
+
+/* ---------------- 显存操作 ---------------- */
+
+/* 把显存整屏刷新到OLED(共8页, 每页128字节) */
+void OLED_Refresh(void)
+{
+    uint8_t page;
+    uint16_t i;
+
+    for (page = 0; page < 8; page++)
+    {
+        OLED_WriteCmd(0xB0 + page);     /* 设置页地址 */
+        OLED_WriteCmd(0x00);            /* 列地址低4位 = 0 */
+        OLED_WriteCmd(0x10);            /* 列地址高4位 = 0 */
+
+        for (i = 0; i < 128; i++)
+        {
+            OLED_WriteData(OLED_Buffer[page * 128 + i]);
+        }
+    }
+}
+
+/* 只清空显存, 不动屏幕(屏幕上的内容要等 OLED_Refresh() 才会变) */
+void OLED_ClearBuffer(void)
+{
+    uint16_t i;
+
+    for (i = 0; i < sizeof(OLED_Buffer); i++)
+    {
+        OLED_Buffer[i] = 0x00;
+    }
+}
+
+/* 清屏: 清空显存并刷新到屏幕 */
+void OLED_Clear(void)
+{
+    OLED_ClearBuffer();
+    OLED_Refresh();
+}
+
+/* 初始化OLED */
+void OLED_Init(void)
+{
+    /* 引脚已由 gpio.c 配置为开漏输出, 这里先拉高释放总线 */
+    OLED_SCL_H();
+    OLED_SDA_H();
+    HAL_Delay(100);     /* 等待SSD1306上电稳定 */
+
+    OLED_WriteCmd(0xAE);    /* 关闭显示 */
+
+    OLED_WriteCmd(0xD5);    /* 设置时钟分频 */
+    OLED_WriteCmd(0x80);
+
+    OLED_WriteCmd(0xA8);    /* 设置多路复用率(1/64) */
+    OLED_WriteCmd(0x3F);
+
+    OLED_WriteCmd(0xD3);    /* 设置显示偏移 = 0 */
+    OLED_WriteCmd(0x00);
+
+    OLED_WriteCmd(0x40);    /* 设置显示起始行 = 0 */
+
+    OLED_WriteCmd(0x8D);    /* 打开电荷泵(小屏供电必需) */
+    OLED_WriteCmd(0x14);
+
+    OLED_WriteCmd(0x20);    /* 页寻址模式 */
+    OLED_WriteCmd(0x02);
+
+    OLED_WriteCmd(0xA1);    /* 段重映射(左右方向) */
+    OLED_WriteCmd(0xC8);    /* COM扫描方向(上下方向) */
+
+    OLED_WriteCmd(0xDA);    /* 设置COM引脚硬件配置 */
+    OLED_WriteCmd(0x12);
+
+    OLED_WriteCmd(0x81);    /* 设置对比度(亮度) */
+    OLED_WriteCmd(0xCF);
+
+    OLED_WriteCmd(0xD9);    /* 设置预充电周期 */
+    OLED_WriteCmd(0xF1);
+
+    OLED_WriteCmd(0xDB);    /* 设置VCOMH电压 */
+    OLED_WriteCmd(0x30);
+
+    OLED_WriteCmd(0xA4);    /* 输出跟随显存内容 */
+    OLED_WriteCmd(0xA6);    /* 正常显示(非反色) */
+
+    OLED_Clear();           /* 清显存 */
+    OLED_WriteCmd(0xAF);    /* 打开显示 */
+}
+
+/* ---------------- 显示函数 ---------------- */
+
+/* 在(x列, y行)显示一个字符。
+ * x: 0~122(6x8字体每个字符占6列)
+ * y: 0~7(每行8个像素) */
+void OLED_ShowChar(uint8_t x, uint8_t y, uint8_t chr)
+{
+    uint8_t i;
+    uint8_t c;
+
+    if (chr < ' ' || chr > '~')
+    {
+        chr = ' ';      /* 字库外的字符显示为空格 */
+    }
+    c = chr - ' ';      /* 转换为字库索引 */
+
+    for (i = 0; i < 6; i++)
+    {
+        if (x + i < 128)
+        {
+            OLED_Buffer[y * 128 + x + i] = OLED_F6x8[c][i];
+        }
+    }
+}
+
+/* 在(x列, y行)显示字符串 */
+void OLED_ShowString(uint8_t x, uint8_t y, const char *str)
+{
+    while (*str != '\0' && x <= 122)
+    {
+        OLED_ShowChar(x, y, (uint8_t)*str);
+        x += 6;
+        str++;
+    }
+}
+
+/* 求 m 的 n 次方(整数) */
+static uint32_t OLED_Pow(uint8_t m, uint8_t n)
+{
+    uint32_t result = 1;
+
+    while (n--)
+    {
+        result *= m;
+    }
+    return result;
+}
+
+/* 在(x列, y行)显示整数, len为占位宽度(不足前面补0) */
+void OLED_ShowNum(uint8_t x, uint8_t y, int32_t num, uint8_t len)
+{
+    uint8_t i;
+    uint8_t neg = 0;
+    uint32_t unum;
+
+    if (num < 0)
+    {
+        neg = 1;
+        unum = (uint32_t)(-num);
+    }
+    else
+    {
+        unum = (uint32_t)num;
+    }
+
+    if (neg)
+    {
+        OLED_ShowChar(x, y, '-');
+        x += 6;
+        if (len > 0)
+        {
+            len--;
+        }
+    }
+
+    for (i = 0; i < len; i++)
+    {
+        OLED_ShowChar(x, y,
+                      (uint8_t)('0' + unum / OLED_Pow(10, len - i - 1) % 10));
+        x += 6;
+    }
+}
+
+/* 在(x列, y行)显示浮点数, dec为小数位数(如1位: 12.3) */
+void OLED_ShowFloat(uint8_t x, uint8_t y, float num, uint8_t dec)
+{
+    int32_t int_part;
+    uint32_t dec_part;
+    uint32_t scale;
+    uint8_t i;
+
+    if (num < 0)
+    {
+        OLED_ShowChar(x, y, '-');
+        x += 6;
+        num = -num;
+    }
+
+    int_part = (int32_t)num;
+    scale = OLED_Pow(10, dec);
+    dec_part = (uint32_t)((num - (float)int_part) * scale + 0.5f);
+
+    /* 小数部分进位处理, 如 9.96 保留1位 -> 10.0 */
+    if (dec_part >= scale)
+    {
+        int_part++;
+        dec_part = 0;
+    }
+
+    /* 计算整数部分位数并完整显示(如 123.4 的 123) */
+    {
+        int32_t tmp = int_part;
+        uint8_t digits = 1;
+
+        while (tmp >= 10)
+        {
+            tmp /= 10;
+            digits++;
+        }
+        OLED_ShowNum(x, y, int_part, digits);
+        x += digits * 6;
+    }
+
+    OLED_ShowChar(x, y, '.');
+    x += 6;
+
+    /* 小数部分固定位数显示(不足补0) */
+    for (i = 0; i < dec; i++)
+    {
+        OLED_ShowChar(x, y,
+                      (uint8_t)('0' + dec_part / OLED_Pow(10, dec - i - 1) % 10));
+        x += 6;
+    }
+}
