@@ -20,7 +20,7 @@
 /* ==================== 上下轴(竖直, 地址1) ==================== */
 #define CRANE_VERT_ADDR          1
 #define CRANE_VERT_DIR_POS       1       /* 1=上, 0=下(实测反了改这里) */
-#define CRANE_VERT_RPM           300u    /* 转速上限(RPM), 首次测试先用低速 */
+#define CRANE_VERT_RPM           50u     /* 转速上限(RPM), 首次测试先用低速 */
 #define CRANE_VERT_ACC           5u      /* 加减速(0=直接换向, 越大越急) */
 #define CRANE_VERT_MAX_MM        15      /* 行程上限(mm), 原点=0 在最下 */
 #define CRANE_VERT_PULSE_PER_MM  10.0f   /* mm->脉冲系数 ★ 标定后修改 */
