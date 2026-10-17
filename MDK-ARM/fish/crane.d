@@ -1,38 +1,28 @@
-fish\crane.o: ..\Hardware\Crane.c
-fish\crane.o: ../Core/Inc/main.h
-fish\crane.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal.h
-fish\crane.o: ../Core/Inc/stm32f4xx_hal_conf.h
-fish\crane.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_rcc.h
-fish\crane.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_def.h
-fish\crane.o: ../Drivers/CMSIS/Device/ST/STM32F4xx/Include/stm32f4xx.h
-fish\crane.o: ../Drivers/CMSIS/Device/ST/STM32F4xx/Include/stm32f407xx.h
-fish\crane.o: ../Drivers/CMSIS/Include/core_cm4.h
-fish\crane.o: D:\keil\ARM\ARMCC\Bin\..\include\stdint.h
-fish\crane.o: ../Drivers/CMSIS/Include/cmsis_version.h
-fish\crane.o: ../Drivers/CMSIS/Include/cmsis_compiler.h
-fish\crane.o: ../Drivers/CMSIS/Include/cmsis_armcc.h
-fish\crane.o: ../Drivers/CMSIS/Include/mpu_armv7.h
-fish\crane.o: ../Drivers/CMSIS/Device/ST/STM32F4xx/Include/system_stm32f4xx.h
-fish\crane.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal.h
-fish\crane.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/Legacy/stm32_hal_legacy.h
-fish\crane.o: D:\keil\ARM\ARMCC\Bin\..\include\stddef.h
-fish\crane.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_rcc_ex.h
-fish\crane.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_gpio.h
-fish\crane.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_gpio_ex.h
-fish\crane.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_exti.h
-fish\crane.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_dma.h
-fish\crane.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_dma_ex.h
-fish\crane.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_cortex.h
-fish\crane.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_flash.h
-fish\crane.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_flash_ex.h
-fish\crane.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_flash_ramfunc.h
-fish\crane.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_i2c.h
-fish\crane.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_i2c_ex.h
-fish\crane.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_pwr.h
-fish\crane.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_pwr_ex.h
-fish\crane.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_tim.h
-fish\crane.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_tim_ex.h
-fish\crane.o: ../Drivers/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_uart.h
-fish\crane.o: ../Core/Inc/usart.h
-fish\crane.o: D:\keil\ARM\ARMCC\Bin\..\include\stdbool.h
-fish\crane.o: ..\Hardware\Crane.h
+fish/crane.o: ..\Hardware\Crane.c ..\Core\Inc\main.h \
+  ..\Drivers\STM32F4xx_HAL_Driver\Inc\stm32f4xx_hal.h \
+  ..\Core\Inc\stm32f4xx_hal_conf.h \
+  ..\Drivers\STM32F4xx_HAL_Driver\Inc\stm32f4xx_hal_rcc.h \
+  ..\Drivers\STM32F4xx_HAL_Driver\Inc\stm32f4xx_hal_def.h \
+  ..\Drivers\CMSIS\Device\ST\STM32F4xx\Include\stm32f4xx.h \
+  ..\Drivers\CMSIS\Device\ST\STM32F4xx\Include\stm32f407xx.h \
+  ..\Drivers\CMSIS\Include\core_cm4.h \
+  ..\Drivers\CMSIS\Device\ST\STM32F4xx\Include\system_stm32f4xx.h \
+  ..\Drivers\STM32F4xx_HAL_Driver\Inc\Legacy\stm32_hal_legacy.h \
+  ..\Drivers\STM32F4xx_HAL_Driver\Inc\stm32f4xx_hal_rcc_ex.h \
+  ..\Drivers\STM32F4xx_HAL_Driver\Inc\stm32f4xx_hal_gpio.h \
+  ..\Drivers\STM32F4xx_HAL_Driver\Inc\stm32f4xx_hal_gpio_ex.h \
+  ..\Drivers\STM32F4xx_HAL_Driver\Inc\stm32f4xx_hal_exti.h \
+  ..\Drivers\STM32F4xx_HAL_Driver\Inc\stm32f4xx_hal_dma.h \
+  ..\Drivers\STM32F4xx_HAL_Driver\Inc\stm32f4xx_hal_dma_ex.h \
+  ..\Drivers\STM32F4xx_HAL_Driver\Inc\stm32f4xx_hal_cortex.h \
+  ..\Drivers\STM32F4xx_HAL_Driver\Inc\stm32f4xx_hal_flash.h \
+  ..\Drivers\STM32F4xx_HAL_Driver\Inc\stm32f4xx_hal_flash_ex.h \
+  ..\Drivers\STM32F4xx_HAL_Driver\Inc\stm32f4xx_hal_flash_ramfunc.h \
+  ..\Drivers\STM32F4xx_HAL_Driver\Inc\stm32f4xx_hal_i2c.h \
+  ..\Drivers\STM32F4xx_HAL_Driver\Inc\stm32f4xx_hal_i2c_ex.h \
+  ..\Drivers\STM32F4xx_HAL_Driver\Inc\stm32f4xx_hal_pwr.h \
+  ..\Drivers\STM32F4xx_HAL_Driver\Inc\stm32f4xx_hal_pwr_ex.h \
+  ..\Drivers\STM32F4xx_HAL_Driver\Inc\stm32f4xx_hal_tim.h \
+  ..\Drivers\STM32F4xx_HAL_Driver\Inc\stm32f4xx_hal_tim_ex.h \
+  ..\Drivers\STM32F4xx_HAL_Driver\Inc\stm32f4xx_hal_uart.h \
+  ..\Core\Inc\usart.h ..\Hardware\Crane.h

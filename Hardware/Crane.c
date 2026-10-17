@@ -65,6 +65,27 @@ static void Crane_Tx_Stop(uint8_t addr, bool snF)
     HAL_UART_Transmit_DMA(&huart3, cmd, 5);
 }
 
+/*
+ * 发送速度模式指令：电机以设定速度连续转动，直到收到停止指令。
+ * dir 为方向，vel 为速度(RPM)，acc 为加速度参数，snF=false 表示不请求应答。
+ */
+static void Crane_Tx_Vel(uint8_t addr, uint8_t dir, uint16_t vel,
+                         uint8_t acc, bool snF)
+{
+    static uint8_t cmd[8];
+
+    cmd[0] = addr;
+    cmd[1] = 0xF6;
+    cmd[2] = dir;
+    cmd[3] = (uint8_t)(vel >> 8);
+    cmd[4] = (uint8_t)(vel >> 0);
+    cmd[5] = acc;
+    cmd[6] = snF;
+    cmd[7] = 0x6B;
+
+    HAL_UART_Transmit_DMA(&huart3, cmd, 8);
+}
+
 /* 发送回原点指令；o_mode 选择驱动器的回零方式。 */
 static void Crane_Tx_Origin(uint8_t addr, uint8_t o_mode, bool snF)
 {
@@ -154,6 +175,13 @@ void Crane_Vert_Stop(void)
     Crane_Tx_Stop(CRANE_VERT_ADDR, false);
 }
 
+/* 命令上下轴以设定速度连续转动，直到调用 Crane_Vert_Stop() 才停。
+ * dir 传 CRANE_VERT_DIR_POS(正转) 或其取反(反转)。 */
+void Crane_Vert_Run(uint8_t dir)
+{
+    Crane_Tx_Vel(CRANE_VERT_ADDR, dir, CRANE_VERT_RPM, CRANE_VERT_ACC, false);
+}
+
 /*
  * 请求上下轴按驱动器的模式 3 回原点（单圈限位开关回零）。
  * 需要将限位开关接到驱动器原点输入；此函数不会等待回零完成，
@@ -225,6 +253,13 @@ void Crane_Hori_MoveRel(int32_t delta_mm)
 void Crane_Hori_Stop(void)
 {
     Crane_Tx_Stop(CRANE_HORI_ADDR, false);
+}
+
+/* 命令前后轴以设定速度连续转动，直到调用 Crane_Hori_Stop() 才停。
+ * dir 传 CRANE_HORI_DIR_POS(正转) 或其取反(反转)。 */
+void Crane_Hori_Run(uint8_t dir)
+{
+    Crane_Tx_Vel(CRANE_HORI_ADDR, dir, CRANE_HORI_RPM, CRANE_HORI_ACC, false);
 }
 
 /*

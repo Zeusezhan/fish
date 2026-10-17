@@ -38,6 +38,7 @@ void     Crane_Vert_Init(void);                 /* 上电使能(只保持不动)
 void     Crane_Vert_MoveTo(int32_t pos_mm);     /* 绝对定位(mm) */
 void     Crane_Vert_MoveRel(int32_t delta_mm);  /* 相对移动(mm) */
 void     Crane_Vert_Stop(void);                 /* 立即停车 */
+void     Crane_Vert_Run(uint8_t dir);           /* 速度模式连续转动(直到 Stop) */
 void     Crane_Vert_Home(void);                 /* 回原点(需接限位开关) */
 int32_t  Crane_Vert_GetPos_mm(void);            /* 读当前位置(mm) */
 
@@ -46,6 +47,7 @@ void     Crane_Hori_Init(void);                 /* 上电使能(只保持不动)
 void     Crane_Hori_MoveTo(int32_t pos_mm);     /* 绝对定位(mm) */
 void     Crane_Hori_MoveRel(int32_t delta_mm);  /* 相对移动(mm) */
 void     Crane_Hori_Stop(void);                 /* 立即停车 */
+void     Crane_Hori_Run(uint8_t dir);           /* 速度模式连续转动(直到 Stop) */
 void     Crane_Hori_Home(void);                 /* 回原点(需接限位开关) */
 int32_t  Crane_Hori_GetPos_mm(void);            /* 读当前位置(mm) */
 

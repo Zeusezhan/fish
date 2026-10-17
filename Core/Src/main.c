@@ -43,13 +43,6 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 
-/* ---- 上下轴电机测试开关 ----
- * 1 = 只测上下轴电机: 跳过 IMU/OLED/菜单/无线等外设初始化,
- *     避免 JY901S 的 I2C 无应答导致程序卡死、走不到电机自检段。
- * 0 = 正常运行完整程序。
- * ★ 测完电机后记得改回 0。 */
-#define CRANE_VERT_TEST_ONLY   1
-
 /* ==================== 航向角 PD 闭环参数 ==================== */
 
 /* PD 参数(上电默认值, 运行中可用 VOFA+ 实时修改):
@@ -217,15 +210,12 @@ int main(void)
   MX_TIM3_Init();
   /* USER CODE BEGIN 2 */
 
-  /* OLED 用软件 I2C(纯 GPIO 翻转, 不会卡死), 测试模式也打开,
-   * 用来在上电自检时显示进度, 方便判断程序有没有跑、跑到哪一步。 */
-  OLED_Init();
-  OLED_Clear();
-
-#if !CRANE_VERT_TEST_ONLY
   /* 初始化 JY901S 姿态模块(I2C 接口, PB6=SCL, PB7=SDA) */
   JY901S_Init();
 
+  /* 初始化 OLED(软件I2C, PD10=SCL, PD8=SDA) */
+  OLED_Init();
+  OLED_Clear();
   OLED_ShowString(0, 0, "JY901S init...");
   OLED_Refresh();
 
@@ -263,47 +253,11 @@ int main(void)
   /* 初始化无线串口上报(VOFA+ 波形), 只复位内部计时,
    * 串口本身已由 MX_USART2_UART_Init() 配好 */
   Wireless_Init();
-#else
-  /* 测试模式: 只显示标题, 不初始化 IMU/菜单/无线 */
-  OLED_ShowString(0, 0, "Crane Vert Test");
-  OLED_Refresh();
-#endif /* !CRANE_VERT_TEST_ONLY */
 
-  /* 先上电使能塔吊上下轴(竖直, 地址1), 只使能不动作。
+  /* 上电使能塔吊上下轴(竖直, 地址1), 只使能不动作。
    * 使能后电机会保持当前位置, 不会自己动。
-   * 前后轴(地址2)暂不使能, 等上下轴调好再开。 */
+   * 前后轴(地址2)待配合抓取功能时再启用。 */
   Crane_Vert_Init();
-
-  /* ==================== 上下轴驱动分步自检 ====================
-   * 上电后分步执行: 上升 -> 观察3秒 -> 下降 -> 观察3秒 -> 停止。
-   * 位置模式: MoveTo 是"走到目标位置就停住保持", 3 秒只是观察时间,
-   * 电机到点后会自动停住, 不会持续转满 3 秒。
-   * 用途: 先空载确认电机能正转、能反转、能停。
-   *
-   * ★ 第一次上电务必注意:
-   *   1) 先空载(不挂吊篮/配重), 防止方向反了直接顶坏结构;
-   *   2) 观察电机实际转向, 若"升到顶"反而下降,
-   *      把 Crane.h 里 CRANE_VERT_DIR_POS 取反(1 改 0);
-   *   3) 调完不想每次上电都自检, 把这整段删掉即可。 */
-  HAL_Delay(1000);                          /* 等驱动器稳定 */
-#if CRANE_VERT_TEST_ONLY
-  OLED_ShowString(0, 2, "Step1: Move Up");
-  OLED_Refresh();
-#endif
-  Crane_Vert_MoveTo(CRANE_VERT_MAX_MM);     /* 第1步: 上升(走到最高 15mm) */
-  HAL_Delay(3000);                          /* 第2步: 观察3秒(到点后自动停住保持) */
-#if CRANE_VERT_TEST_ONLY
-  OLED_ShowString(0, 4, "Step2: Move Down");
-  OLED_Refresh();
-#endif
-  Crane_Vert_MoveTo(0);                     /* 第3步: 下降(走回最低 0) */
-  HAL_Delay(3000);                          /* 第4步: 观察3秒 */
-#if CRANE_VERT_TEST_ONLY
-  OLED_ShowString(0, 6, "Step3: Stop");
-  OLED_Refresh();
-#endif
-  Crane_Vert_Stop();                        /* 第5步: 发送停止指令 */
-  /* ==================== 自检结束 ==================== */
 
   /* 启动 TIM3 更新中断(20ms 一次), 航向角 PD 运算在中断回调里做。
    * CubeMX 不会自动生成这一句, 不加的话中断永远不会进来。 */
@@ -318,7 +272,6 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-#if !CRANE_VERT_TEST_ONLY
     /* I2C 轮询读取 JY901S 姿态数据(内部按 20ms 间隔控制频率) */
     JY901S_Poll();
 
@@ -332,7 +285,6 @@ int main(void)
     /* OLED 菜单: 内部处理按键(切换页面/移动光标)并绘制当前页面,
      * 显示按 100ms 限频刷新。显示内容全部由 Menu.c 负责。 */
     Menu_Run();
-#endif /* !CRANE_VERT_TEST_ONLY */
   }
   /* USER CODE END 3 */
 }
