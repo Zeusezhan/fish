@@ -43,6 +43,18 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 
+/* ---- 行程标定测试开关 ----
+ * 0 = 关闭(正常运行完整程序)
+ * 1 = 标定 z 轴(上下轴, 地址1)
+ * 2 = 标定 xy 轴(前后轴, 地址2)
+ * 标定时: 上电使能对应轴 -> 走 CRANE_CALIB_PULSE 个脉冲 -> 停。
+ * 用直尺量出滑台实际位移(mm)后:
+ *     PULSE_PER_MM = CRANE_CALIB_PULSE / 实测位移mm
+ * 把结果填回 Crane.h 的 CRANE_*_PULSE_PER_MM。
+ * ★ 标定完记得把 CRANE_CALIB_AXIS 改回 0。 */
+#define CRANE_CALIB_AXIS    0
+#define CRANE_CALIB_PULSE   6400u   /* 3200=1圈(16细分), 建议6400=2圈更准 */
+
 /* ==================== 航向角 PD 闭环参数 ==================== */
 
 /* PD 参数(上电默认值, 运行中可用 VOFA+ 实时修改):
@@ -210,12 +222,14 @@ int main(void)
   MX_TIM3_Init();
   /* USER CODE BEGIN 2 */
 
+  /* 初始化 OLED(软件I2C, PD10=SCL, PD8=SDA), 标定时也用来显示提示 */
+  OLED_Init();
+  OLED_Clear();
+
+#if (CRANE_CALIB_AXIS == 0)
   /* 初始化 JY901S 姿态模块(I2C 接口, PB6=SCL, PB7=SDA) */
   JY901S_Init();
 
-  /* 初始化 OLED(软件I2C, PD10=SCL, PD8=SDA) */
-  OLED_Init();
-  OLED_Clear();
   OLED_ShowString(0, 0, "JY901S init...");
   OLED_Refresh();
 
@@ -253,11 +267,33 @@ int main(void)
   /* 初始化无线串口上报(VOFA+ 波形), 只复位内部计时,
    * 串口本身已由 MX_USART2_UART_Init() 配好 */
   Wireless_Init();
+#endif /* CRANE_CALIB_AXIS == 0 */
 
-  /* 上电使能塔吊上下轴(竖直, 地址1), 只使能不动作。
-   * 使能后电机会保持当前位置, 不会自己动。
+  /* 使能塔吊对应轴(标定/正常都用) */
+#if (CRANE_CALIB_AXIS == 1)
+  Crane_Vert_Init();                        /* 标定 z 轴: 使能上下轴(地址1) */
+#elif (CRANE_CALIB_AXIS == 2)
+  Crane_Hori_Init();                        /* 标定 xy 轴: 使能前后轴(地址2) */
+#else
+  /* 正常模式: 上电使能上下轴(竖直, 地址1), 只使能不动作。
    * 前后轴(地址2)待配合抓取功能时再启用。 */
   Crane_Vert_Init();
+#endif
+
+  /* ---- 行程标定: 走固定脉冲数, 量实际位移 ---- */
+#if (CRANE_CALIB_AXIS == 1)
+  OLED_ShowString(0, 0, "Calib Z...");
+  OLED_Refresh();
+  HAL_Delay(1000);                          /* 等驱动器稳定 */
+  Crane_Vert_MovePulse(CRANE_CALIB_PULSE);  /* z 轴走 CRANE_CALIB_PULSE 个脉冲 */
+  HAL_Delay(3000);                          /* 等它走完, 再量位移 */
+#elif (CRANE_CALIB_AXIS == 2)
+  OLED_ShowString(0, 0, "Calib XY...");
+  OLED_Refresh();
+  HAL_Delay(1000);                          /* 等驱动器稳定 */
+  Crane_Hori_MovePulse(CRANE_CALIB_PULSE);  /* xy 轴走 CRANE_CALIB_PULSE 个脉冲 */
+  HAL_Delay(3000);                          /* 等它走完, 再量位移 */
+#endif
 
   /* 启动 TIM3 更新中断(20ms 一次), 航向角 PD 运算在中断回调里做。
    * CubeMX 不会自动生成这一句, 不加的话中断永远不会进来。 */
@@ -272,6 +308,7 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+#if (CRANE_CALIB_AXIS == 0)
     /* I2C 轮询读取 JY901S 姿态数据(内部按 20ms 间隔控制频率) */
     JY901S_Poll();
 
@@ -285,6 +322,7 @@ int main(void)
     /* OLED 菜单: 内部处理按键(切换页面/移动光标)并绘制当前页面,
      * 显示按 100ms 限频刷新。显示内容全部由 Menu.c 负责。 */
     Menu_Run();
+#endif /* CRANE_CALIB_AXIS == 0 */
   }
   /* USER CODE END 3 */
 }

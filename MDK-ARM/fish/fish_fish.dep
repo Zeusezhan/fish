@@ -2,7 +2,7 @@ Dependencies for Project 'fish', Target 'fish': (DO NOT MODIFY !)
 CompilerVersion: 6220000::V6.22::ARMCLANG
 F (startup_stm32f407xx.s)(0x6ACE3209)(--cpu Cortex-M4.fp.sp -g --diag_suppress=A1950W-I.\RTE\_fish-ID:\keil\ARM\PACK\ARM\CMSIS\6.1.0\CMSIS\Core\Include-ID:\keil\ARM\PACK\Keil\STM32F4xx_DFP\2.16.0\Drivers\CMSIS\Device\ST\STM32F4xx\Include-ID:\keil\ARM\PACK\Keil\STM32F4xx_DFP\2.16.0\Device\Include--pd "__UVISION_VERSION SETA 540"--pd "STM32F407xx SETA 1"--pd "_RTE_ SETA 1"--list startup_stm32f407xx.lst--xref -o fish\startup_stm32f407xx.o--depend fish\startup_stm32f407xx.d)
 F (../Core/Inc/tim.h)(0x6ABDFA3E)()
-F (../Core/Src/main.c)(0x6AD377EE)(-xc -std=c99 --target=arm-arm-none-eabi -mcpu=cortex-m4 -mfpu=fpv4-sp-d16 -mfloat-abi=hard -c-fno-rtti -funsigned-char -fshort-enums -fshort-wchar-gdwarf-4 -O3 -ffunction-sections -Wno-packed -Wno-missing-variable-declarations -Wno-missing-prototypes -Wno-missing-noreturn -Wno-sign-conversion -Wno-nonportable-include-path -Wno-reserved-id-macro -Wno-unused-macros -Wno-documentation-unknown-command -Wno-documentation -Wno-license-management -Wno-parentheses-equality -Wno-reserved-identifier -I ../Core/Inc -I ../Drivers/STM32F4xx_HAL_Driver/Inc -I ../Drivers/STM32F4xx_HAL_Driver/Inc/Legacy -I ../Drivers/CMSIS/Device/ST/STM32F4xx/Include -I ../Drivers/CMSIS/Include -I ../Core/Src -I ../Hardware-I./RTE/_fish-ID:/keil/ARM/PACK/ARM/CMSIS/6.1.0/CMSIS/Core/Include-ID:/keil/ARM/PACK/Keil/STM32F4xx_DFP/2.16.0/Drivers/CMSIS/Device/ST/STM32F4xx/Include-ID:/keil/ARM/PACK/Keil/STM32F4xx_DFP/2.16.0/Device/Include-D__UVISION_VERSION="540" -DSTM32F407xx -D_RTE_ -DUSE_HAL_DRIVER -DSTM32F407xx-o fish/main.o -MMD)
+F (../Core/Src/main.c)(0x6AD3933D)(-xc -std=c99 --target=arm-arm-none-eabi -mcpu=cortex-m4 -mfpu=fpv4-sp-d16 -mfloat-abi=hard -c-fno-rtti -funsigned-char -fshort-enums -fshort-wchar-gdwarf-4 -O3 -ffunction-sections -Wno-packed -Wno-missing-variable-declarations -Wno-missing-prototypes -Wno-missing-noreturn -Wno-sign-conversion -Wno-nonportable-include-path -Wno-reserved-id-macro -Wno-unused-macros -Wno-documentation-unknown-command -Wno-documentation -Wno-license-management -Wno-parentheses-equality -Wno-reserved-identifier -I ../Core/Inc -I ../Drivers/STM32F4xx_HAL_Driver/Inc -I ../Drivers/STM32F4xx_HAL_Driver/Inc/Legacy -I ../Drivers/CMSIS/Device/ST/STM32F4xx/Include -I ../Drivers/CMSIS/Include -I ../Core/Src -I ../Hardware-I./RTE/_fish-ID:/keil/ARM/PACK/ARM/CMSIS/6.1.0/CMSIS/Core/Include-ID:/keil/ARM/PACK/Keil/STM32F4xx_DFP/2.16.0/Drivers/CMSIS/Device/ST/STM32F4xx/Include-ID:/keil/ARM/PACK/Keil/STM32F4xx_DFP/2.16.0/Device/Include-D__UVISION_VERSION="540" -DSTM32F407xx -D_RTE_ -DUSE_HAL_DRIVER -DSTM32F407xx-o fish/main.o -MMD)
 I (..\Core\Inc\main.h)(0x6A9AA962)
 I (..\Drivers\STM32F4xx_HAL_Driver\Inc\stm32f4xx_hal.h)(0x6AA53487)
 I (..\Core\Inc\stm32f4xx_hal_conf.h)(0x6ABDFA3E)
@@ -35,7 +35,7 @@ I (..\Core\Inc\i2c.h)(0x6A9AA960)
 I (..\Core\Inc\tim.h)(0x6ABDFA3E)
 I (..\Core\Inc\usart.h)(0x6A9AA960)
 I (..\Core\Inc\gpio.h)(0x6A9AA960)
-I (..\Hardware\Crane.h)(0x6AD377CB)
+I (..\Hardware\Crane.h)(0x6AD480C2)
 I (..\Hardware\function.h)(0x6ABE0C02)
 I (..\Hardware\Emm_V5.h)(0x6A9AAF14)
 I (..\Hardware\jy901s.h)(0x6ABDF40C)
@@ -818,8 +818,8 @@ I (..\Drivers\STM32F4xx_HAL_Driver\Inc\stm32f4xx_hal_tim.h)(0x6AA53487)
 I (..\Drivers\STM32F4xx_HAL_Driver\Inc\stm32f4xx_hal_tim_ex.h)(0x6AA53487)
 I (..\Drivers\STM32F4xx_HAL_Driver\Inc\stm32f4xx_hal_uart.h)(0x6AA53487)
 I (..\Core\Inc\usart.h)(0x6A9AA960)
-I (..\Hardware\Crane.h)(0x6AD377CB)
-F (..\Hardware\Crane.h)(0x6AD377CB)()
+I (..\Hardware\Crane.h)(0x6AD480C2)
+F (..\Hardware\Crane.h)(0x6AD480C2)()
 F (..\Hardware\function.c)(0x6ACA1AEF)(-xc -std=c99 --target=arm-arm-none-eabi -mcpu=cortex-m4 -mfpu=fpv4-sp-d16 -mfloat-abi=hard -c-fno-rtti -funsigned-char -fshort-enums -fshort-wchar-gdwarf-4 -O3 -ffunction-sections -Wno-packed -Wno-missing-variable-declarations -Wno-missing-prototypes -Wno-missing-noreturn -Wno-sign-conversion -Wno-nonportable-include-path -Wno-reserved-id-macro -Wno-unused-macros -Wno-documentation-unknown-command -Wno-documentation -Wno-license-management -Wno-parentheses-equality -Wno-reserved-identifier -I ../Core/Inc -I ../Drivers/STM32F4xx_HAL_Driver/Inc -I ../Drivers/STM32F4xx_HAL_Driver/Inc/Legacy -I ../Drivers/CMSIS/Device/ST/STM32F4xx/Include -I ../Drivers/CMSIS/Include -I ../Core/Src -I ../Hardware-I./RTE/_fish-ID:/keil/ARM/PACK/ARM/CMSIS/6.1.0/CMSIS/Core/Include-ID:/keil/ARM/PACK/Keil/STM32F4xx_DFP/2.16.0/Drivers/CMSIS/Device/ST/STM32F4xx/Include-ID:/keil/ARM/PACK/Keil/STM32F4xx_DFP/2.16.0/Device/Include-D__UVISION_VERSION="540" -DSTM32F407xx -D_RTE_ -DUSE_HAL_DRIVER -DSTM32F407xx-o fish/function.o -MMD)
 I (..\Core\Inc\main.h)(0x6A9AA962)
 I (..\Drivers\STM32F4xx_HAL_Driver\Inc\stm32f4xx_hal.h)(0x6AA53487)

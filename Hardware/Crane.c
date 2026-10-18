@@ -182,6 +182,15 @@ void Crane_Vert_Run(uint8_t dir)
     Crane_Tx_Vel(CRANE_VERT_ADDR, dir, CRANE_VERT_RPM, CRANE_VERT_ACC, false);
 }
 
+/* 命令上下轴相对运动 clk 个脉冲，专用于行程标定。
+ * 走固定脉冲数(如 3200 = 1 圈)，量出实际位移即可反推 PULSE_PER_MM。 */
+void Crane_Vert_MovePulse(uint32_t clk)
+{
+    if (clk == 0) { return; }
+    Crane_Tx_Pos(CRANE_VERT_ADDR, CRANE_VERT_DIR_POS, CRANE_VERT_RPM,
+                 CRANE_VERT_ACC, clk, false, false);
+}
+
 /*
  * 请求上下轴按驱动器的模式 3 回原点（单圈限位开关回零）。
  * 需要将限位开关接到驱动器原点输入；此函数不会等待回零完成，
@@ -260,6 +269,15 @@ void Crane_Hori_Stop(void)
 void Crane_Hori_Run(uint8_t dir)
 {
     Crane_Tx_Vel(CRANE_HORI_ADDR, dir, CRANE_HORI_RPM, CRANE_HORI_ACC, false);
+}
+
+/* 命令前后轴相对运动 clk 个脉冲，专用于行程标定。
+ * 走固定脉冲数(如 3200 = 1 圈)，量出实际位移即可反推 PULSE_PER_MM。 */
+void Crane_Hori_MovePulse(uint32_t clk)
+{
+    if (clk == 0) { return; }
+    Crane_Tx_Pos(CRANE_HORI_ADDR, CRANE_HORI_DIR_POS, CRANE_HORI_RPM,
+                 CRANE_HORI_ACC, clk, false, false);
 }
 
 /*
