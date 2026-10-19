@@ -53,12 +53,17 @@
 #define JY901S_RRATE_50HZ       0x08
 #define JY901S_RRATE_100HZ      0x09
 
-/* I2C 单次传输超时(ms) */
-#define JY901S_I2C_TIMEOUT      200
+/* I2C 单次传输超时(ms)
+ * ★ 不能设太大: 读失败时 HAL 会一直等到超时, 主循环(OLED/按键/上报)
+ *   都会被卡住。100kHz 下读 24 字节约 2.2ms, 10ms 足够。 */
+#define JY901S_I2C_TIMEOUT      10
 
 /* 轮询间隔(ms): 模块出厂 10Hz 输出, 20ms 轮询即可覆盖;
  * 若把模块改到 50/100Hz, 这里可相应缩短到 10ms */
 #define JY901S_POLL_INTERVAL_MS 20
+
+/* 连续读失败后的重试间隔(ms): 避免 IMU 掉线时主循环一直被 I2C 超时拖住 */
+#define JY901S_POLL_RETRY_MS    200
 
 /* 模块解算后的数据 */
 typedef struct
@@ -108,5 +113,11 @@ void JY901S_ZeroYaw(void);
  * 注意: 该设置写入模块后断电不丢失, 只需设置一次。
  * 例: JY901S_SetOutputRate(JY901S_RRATE_50HZ); */
 void JY901S_SetOutputRate(uint8_t rate_code);
+
+/* 【设置 6 轴算法】写 AXIS6 并保存参数。返回 0 = 成功。 */
+uint8_t JY901S_SetAlgorithm6Axis(void);
+
+/* 【加速度/陀螺仪校准】调用前模块必须水平静止, 内部等待约 3 秒。 */
+void JY901S_CalibrateAccGyro(void);
 
 #endif /* __JY901S_H */
