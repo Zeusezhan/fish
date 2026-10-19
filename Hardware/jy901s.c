@@ -16,6 +16,7 @@
 #include "i2c.h"
 #include "gpio.h"
 #include "jy901s.h"
+#include "REG.h"
 
 /* 模块解算数据(外部只读) */
 JY901S_Data_t jy901s_data;
@@ -30,8 +31,9 @@ static float    jy_yaw_unwrapped_raw = 0.0f;  /* 解缠绕后的原始角度 */
 static float    jy_zero_base = 0.0f;
 
 /* ---- I2C 轮询计时 ---- */
-static uint32_t jy_last_poll_tick = 0;
+static uint32_t jy_next_poll_tick = 0;   /* 下一次允许读取的时刻 */
 static uint8_t  jy_first_poll = 1;       /* 1 = 第一次调用立刻读, 不等间隔 */
+static uint8_t  jy_fail_cnt = 0;         /* 连续读取失败次数 */
 
 /* ==================== I2C 底层 ==================== */
 
@@ -246,8 +248,9 @@ void JY901S_Init(void)
     jy_yaw_unwrapped_raw = 0.0f;
     jy_zero_base = 0.0f;
 
-    jy_last_poll_tick = HAL_GetTick();
+    jy_next_poll_tick = HAL_GetTick();
     jy_first_poll = 1;
+    jy_fail_cnt = 0;
 }
 
 /**
@@ -261,8 +264,29 @@ uint8_t JY901S_ReadOnce(void)
     uint8_t buf[JY901S_REG_BYTES];
     int16_t reg[JY901S_REG_NUM];
     uint8_t i;
+    uint8_t all_zero = 1u;
+    uint8_t all_ff   = 1u;
 
     if (jy_i2c_read_regs(JY901S_REG_AX, buf, JY901S_REG_BYTES) != 0)
+    {
+        return 1;
+    }
+
+    /* 整帧全 0x00 或全 0xFF 是典型的无效数据(总线悬空/模块没应答),
+     * 直接丢弃, 避免把 yaw 误解析成 0 而看起来"自己回到 0 度"。 */
+    for (i = 0; i < JY901S_REG_BYTES; i++)
+    {
+        if (buf[i] != 0x00u)
+        {
+            all_zero = 0u;
+        }
+        if (buf[i] != 0xFFu)
+        {
+            all_ff = 0u;
+        }
+    }
+
+    if ((all_zero != 0u) || (all_ff != 0u))
     {
         return 1;
     }
@@ -286,16 +310,32 @@ uint8_t JY901S_ReadOnce(void)
 void JY901S_Poll(void)
 {
     uint32_t now = HAL_GetTick();
+    uint8_t  ret;
 
     /* 第一次调用不等待, 立刻读一帧, 缩短上电后的数据准备时间 */
-    if (!jy_first_poll && (now - jy_last_poll_tick < JY901S_POLL_INTERVAL_MS))
+    if (!jy_first_poll && ((int32_t)(now - jy_next_poll_tick) < 0))
     {
         return;
     }
     jy_first_poll = 0;
-    jy_last_poll_tick = now;
 
-    (void)JY901S_ReadOnce();
+    ret = JY901S_ReadOnce();
+
+    if (ret == 0u)
+    {
+        jy_fail_cnt = 0;
+        jy_next_poll_tick = HAL_GetTick() + JY901S_POLL_INTERVAL_MS;
+    }
+    else
+    {
+        /* 连续失败后降低重试频率, 避免主循环一直卡在 I2C 超时上 */
+        if (jy_fail_cnt < 255u)
+        {
+            jy_fail_cnt++;
+        }
+        jy_next_poll_tick = HAL_GetTick() +
+            ((jy_fail_cnt >= 5u) ? JY901S_POLL_RETRY_MS : JY901S_POLL_INTERVAL_MS);
+    }
 }
 
 /**
@@ -331,4 +371,75 @@ void JY901S_SetOutputRate(uint8_t rate_code)
     cmd[0] = rate_code;
     cmd[1] = 0x00;
     (void)jy_i2c_write_regs(JY901S_REG_RRATE, cmd, 2);
+}
+
+/**
+  * @brief  把模块切换为 6 轴算法(不使用磁力计)
+  * @retval 0 = 成功, 1 = 有写操作失败
+  * @note   写 AXIS6 寄存器后保存参数。6 轴模式下 Yaw 是相对角度,
+  *         不会再被磁力计/磁场干扰慢慢拉回某个参考值。
+  */
+uint8_t JY901S_SetAlgorithm6Axis(void)
+{
+    uint8_t cmd[2];
+    uint8_t ret = 0u;
+
+    /* 解锁 */
+    cmd[0] = (uint8_t)(KEY_UNLOCK & 0xFF);
+    cmd[1] = (uint8_t)(KEY_UNLOCK >> 8);
+    ret |= jy_i2c_write_regs(KEY, cmd, 2);
+    HAL_Delay(2);
+
+    /* AXIS6 = ALGRITHM6 */
+    cmd[0] = (uint8_t)ALGRITHM6;
+    cmd[1] = 0x00u;
+    ret |= jy_i2c_write_regs(AXIS6, cmd, 2);
+    HAL_Delay(2);
+
+    /* 再次解锁后保存参数, 断电不丢失 */
+    cmd[0] = (uint8_t)(KEY_UNLOCK & 0xFF);
+    cmd[1] = (uint8_t)(KEY_UNLOCK >> 8);
+    ret |= jy_i2c_write_regs(KEY, cmd, 2);
+    HAL_Delay(2);
+
+    cmd[0] = (uint8_t)SAVE_PARAM;
+    cmd[1] = 0x00u;
+    ret |= jy_i2c_write_regs(SAVE, cmd, 2);
+    HAL_Delay(100);
+
+    return ret;
+}
+
+/**
+  * @brief  加速度/陀螺仪校准
+  * @note   调用前模块必须水平静止放置; 内部等待约 3 秒。
+  *         校准后会重新清零 Yaw, 由调用者在之后执行 JY901S_ZeroYaw()。
+  */
+void JY901S_CalibrateAccGyro(void)
+{
+    uint8_t cmd[2];
+
+    /* 开始校准 */
+    cmd[0] = (uint8_t)(KEY_UNLOCK & 0xFF);
+    cmd[1] = (uint8_t)(KEY_UNLOCK >> 8);
+    (void)jy_i2c_write_regs(KEY, cmd, 2);
+    HAL_Delay(2);
+
+    cmd[0] = (uint8_t)CALGYROACC;
+    cmd[1] = 0x00u;
+    (void)jy_i2c_write_regs(CALSW, cmd, 2);
+
+    /* 保持静止, 等待模块完成校准 */
+    HAL_Delay(3000u);
+
+    /* 结束校准 */
+    cmd[0] = (uint8_t)(KEY_UNLOCK & 0xFF);
+    cmd[1] = (uint8_t)(KEY_UNLOCK >> 8);
+    (void)jy_i2c_write_regs(KEY, cmd, 2);
+    HAL_Delay(2);
+
+    cmd[0] = (uint8_t)NORMAL;
+    cmd[1] = 0x00u;
+    (void)jy_i2c_write_regs(CALSW, cmd, 2);
+    HAL_Delay(50u);
 }
