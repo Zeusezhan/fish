@@ -773,16 +773,6 @@
               <FilePath>..\Hardware\OLED.h</FilePath>
             </File>
             <File>
-              <FileName>wit_c_sdk.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\Hardware\wit_c_sdk.c</FilePath>
-            </File>
-            <File>
-              <FileName>wit_c_sdk.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>..\Hardware\wit_c_sdk.h</FilePath>
-            </File>
-            <File>
               <FileName>REG.h</FileName>
               <FileType>5</FileType>
               <FilePath>..\Hardware\REG.h</FilePath>

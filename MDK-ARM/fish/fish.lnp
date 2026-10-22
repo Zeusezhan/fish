@@ -34,7 +34,6 @@
 "fish\key.o"
 "fish\menu.o"
 "fish\oled.o"
-"fish\wit_c_sdk.o"
 "fish\wireless_uart.o"
 --strict --scatter "fish\fish.sct"
 --summary_stderr --info summarysizes --map --load_addr_map_info --xref --callgraph --symbols

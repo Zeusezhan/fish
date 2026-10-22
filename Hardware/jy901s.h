@@ -53,12 +53,14 @@
 #define JY901S_RRATE_50HZ       0x08
 #define JY901S_RRATE_100HZ      0x09
 
-/* I2C 单次传输超时(ms) */
-#define JY901S_I2C_TIMEOUT      200
+/* I2C 单次传输超时(ms)。读取失败时尽快返回, 避免阻塞主循环。 */
+#define JY901S_I2C_TIMEOUT      10
 
-/* 轮询间隔(ms): 模块出厂 10Hz 输出, 20ms 轮询即可覆盖;
- * 若把模块改到 50/100Hz, 这里可相应缩短到 10ms */
+/* 正常轮询间隔(ms) */
 #define JY901S_POLL_INTERVAL_MS 20
+
+/* 连续读取失败后的重试间隔(ms) */
+#define JY901S_POLL_RETRY_MS    200
 
 /* 模块解算后的数据 */
 typedef struct
@@ -95,8 +97,7 @@ void JY901S_Init(void);
 void JY901S_Poll(void);
 
 /* 【立即读取】不受轮询间隔限制, 立刻读一次并解析。
- * 返回: 0 = 成功, 1 = I2C 通信失败。
- * 需要更高刷新率的闭环循环里可以调用它。 */
+ * 返回: 0 = 成功, 1 = I2C 通信失败或整帧数据无效。 */
 uint8_t JY901S_ReadOnce(void);
 
 /* 【航向清零】把当前朝向记为 0 度基准。
@@ -108,5 +109,13 @@ void JY901S_ZeroYaw(void);
  * 注意: 该设置写入模块后断电不丢失, 只需设置一次。
  * 例: JY901S_SetOutputRate(JY901S_RRATE_50HZ); */
 void JY901S_SetOutputRate(uint8_t rate_code);
+
+/* 【设置 6 轴算法】禁用磁力计参与姿态解算并保存模块配置。
+ * 返回: 0 = 成功, 非 0 = 至少一次 I2C 写入失败。 */
+uint8_t JY901S_SetAlgorithm6Axis(void);
+
+/* 【加速度/陀螺仪校准】模块需水平静止放置, 调用期间阻塞约 3 秒。
+ * 校准完成后如需重新设定航向基准, 再调用 JY901S_ZeroYaw()。 */
+void JY901S_CalibrateAccGyro(void);
 
 #endif /* __JY901S_H */

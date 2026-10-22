@@ -7,8 +7,8 @@
  *
  * 【电机布局】(已确认)
  *            车头
- *      4(左前)      1(右前)
- *      3(左后)      2(右后)
+ *      3(左前)      1(右前)
+ *      4(左后)      2(右后)
  *
  * 【本文件提供的接口】
  *   底层:  fish_Step_All_Control()  直接给四个电机设速度并同步启动
@@ -58,7 +58,18 @@ void Car_TurnLeft(uint16_t vel);        /* 原地左转(逆时针) */
 void Car_TurnRight(uint16_t vel);       /* 原地右转(顺时针) */
 
 /* 【停车】四个电机立即停止并同步触发。
- * 注意: 内部有 4 个 HAL_Delay(2), 不能在中断里调用。 */
-void Car_Stop(void);
+ * 返回 1 表示全部停止帧发送成功, 0 表示至少一条失败。
+ * 注意: 内部逐条阻塞发送, 不能在中断里调用。 */
+uint8_t Car_Stop(void);
+
+/* 【调试】使能/失能四个底盘电机。返回 1 表示所有命令均已发送。 */
+uint8_t Car_SetEnabled(uint8_t enabled);
+
+/* 【调试】读取指定电机的当前位置脉冲计数(S_CPOS)。
+ * 返回 1 表示收到有效响应；返回 0 表示串口超时或响应帧无效。 */
+uint8_t Car_ReadPositionCount(uint8_t motor_id, int32_t *position);
+
+/* 【调试】将 1~4 号电机的当前位置清零。返回 1 表示清零命令均已发送。 */
+uint8_t Car_ResetPositionCounts(void);
 
 #endif /* __FUNCTION_H */

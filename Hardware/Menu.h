@@ -8,9 +8,11 @@
  * 【页面结构】
  *   第一页  选择界面 MENU_PAGE_MAIN
  *             ├─ Parameters   -> 参数界面(显示陀螺仪数据)
- *             └─ Mode Select  -> 模式选择(暂未实现, 留空)
+ *             ├─ Mode Select  -> PD 监测
+ *             └─ Debug        -> 定时直行与底盘位置计数
  *   子界面   参数界面 MENU_PAGE_PARAM
  *            模式界面 MENU_PAGE_MODE
+ *   调试界面 MENU_PAGE_DEBUG
  *
  * 【按键操作】按键定义见 key.h
  *   第一页(选择界面):
@@ -18,16 +20,19 @@
  *       PE0 (KEY_1) = 确定              进入光标所指的界面
  *   参数界面:
  *       PE2 (KEY_3) = 返回              回到第一页
- *   模式界面(启停开关):
- *       PE0 (KEY_1) = 启动 / 停止       按一次启动航向闭环, 再按一次停止并停车
+ *   模式界面(PD 监测):
+ *       PE0 (KEY_1) = 启动 / 停止       只启停航向 PD 计算, 不控制底盘电机
  *       PE2 (KEY_3) = 返回              回到第一页
- *   第一页已经是最顶层, 所以按 PE2 不做任何事。
+ *   调试界面: 停车时 PE0 短按循环选择前进/左移/右移/后退, 长按启动;
+ *              运行中 PE0 立即停车。PE1/PE2 短按调秒, 长按清零/返回。
+ *              启动时若陀螺仪已就绪, 自动把当前航向设为目标,
+ *              四种方向都用 g_yaw_output 做航向保持;
+ *              陀螺仪未就绪时只发原始命令并在屏幕上提示。
+ *              清零后会读回验证, 成功后节点号递增; 秒数范围为 1~99 秒。
  *
  * 【模式页怎么工作】
- *   PE0 不直接开/关闭环, 而是翻转 g_mode_run_request 这个请求标志,
- *   真正的启动/停车由 main.c 的 Heading_UpdateRunState() 在主循环里
- *   执行(因为电机命令内部有 HAL_Delay, 不能在中断里调用)。
- *   这样菜单只管界面和按键, 不直接碰电机逻辑, 分层更清楚。
+ *   PE0 翻转 g_mode_run_request, main.c 根据请求启停 PD 计算。
+ *   当前该输出只用于观察/串口上报, 不下发电机命令。
  *
  * 【使用方法】
  *   1. 上电时调用一次 Menu_Init()
@@ -54,13 +59,15 @@ typedef enum
 {
     MENU_PAGE_MAIN = 0,     /* 第一页: 选择界面 */
     MENU_PAGE_PARAM,        /* 参数界面: 陀螺仪数据 */
-    MENU_PAGE_MODE          /* 模式选择: 暂未实现 */
+    MENU_PAGE_MODE,         /* PD 监测与启停 */
+    MENU_PAGE_DEBUG         /* 定时直行与底盘位置计数 */
 } MenuPage_t;
 
 /* 第一页里可选的菜单项 */
 #define MENU_ITEM_PARAM     0   /* 参数界面 */
 #define MENU_ITEM_MODE      1   /* 模式选择 */
-#define MENU_ITEM_NUM       2   /* 菜单项总数 */
+#define MENU_ITEM_DEBUG     2   /* 底盘调试 */
+#define MENU_ITEM_NUM       3   /* 菜单项总数 */
 
 /* 【初始化】上电调用一次, 把页面复位到第一页 */
 void Menu_Init(void);
