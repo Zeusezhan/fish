@@ -733,6 +733,16 @@
               <FilePath>..\Hardware\function.h</FilePath>
             </File>
             <File>
+              <FileName>inertial.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Hardware\inertial.c</FilePath>
+            </File>
+            <File>
+              <FileName>inertial.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Hardware\inertial.h</FilePath>
+            </File>
+            <File>
               <FileName>jy901s.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\Hardware\jy901s.c</FilePath>

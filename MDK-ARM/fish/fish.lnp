@@ -30,6 +30,7 @@
 "fish\emm_v5.o"
 "fish\crane.o"
 "fish\function.o"
+"fish\inertial.o"
 "fish\jy901s.o"
 "fish\key.o"
 "fish\menu.o"

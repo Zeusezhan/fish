@@ -27,4 +27,4 @@ fish/menu.o: ..\Hardware\Menu.c ..\Core\Inc\main.h \
   ..\Drivers\STM32F4xx_HAL_Driver\Inc\stm32f4xx_hal_uart.h \
   ..\Hardware\OLED.h ..\Hardware\jy901s.h ..\Hardware\key.h \
   ..\Hardware\Menu.h ..\Hardware\function.h ..\Hardware\Emm_V5.h \
-  ..\Core\Inc\usart.h
+  ..\Core\Inc\usart.h ..\Hardware\inertial.h

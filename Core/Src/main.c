@@ -145,13 +145,11 @@ int main(void)
   MX_TIM3_Init();
   /* USER CODE BEGIN 2 */
 
-  /* 初始化 JY901S 姿态模块(I2C 接口, PB6=SCL, PB7=SDA) */
   JY901S_Init();
 
   OLED_ShowString(0, 0, "JY901S init...");
   OLED_Refresh();
 
-  /* 等模块上电稳定, 然后主动读一帧, 确认它能正常应答 */
   HAL_Delay(500);
   (void)JY901S_ReadOnce();
 
@@ -174,22 +172,19 @@ int main(void)
 
   /* 起跑前把当前朝向清零, 之后读到的 Yaw 都是相对这个方向 */
   JY901S_ZeroYaw();
-
-  /* 初始化按键(PE0=KEY1, PE1=KEY2, PE2=KEY3, 上拉输入, 按下为低电平)
-   * 引脚已由 MX_GPIO_Init() 配置好, 这里只复位内部状态 */
   Key_Init();
-
-  /* 初始化 OLED 菜单, 从第一页(选择界面)开始 */
   Menu_Init();
 
   /* 初始化无线串口上报(VOFA+ 波形), 只复位内部计时,
    * 串口本身已由 MX_USART2_UART_Init() 配好 */
-  Wireless_Init();
+  //Wireless_Init();
 
   /* 启动 TIM3 更新中断(20ms 一次), 航向角 PD 运算在中断回调里做。
-   * CubeMX 不会自动生成这一句, 不加的话中断永远不会进来。
-   * 调试页有停车状态锁, 停车期间不会再下发速度命令, 可以和闭环共存。 */
-  HAL_TIM_Base_Start_IT(&htim3);
+   * CubeMX 不会自动生成这一句, 不加的话中断永远不会进来。 */
+  /* 当前只调试底盘运动, 暂时不启动航向 PD 中断;
+   * 需要"边调试边闭环"时把下面这行取消注释, 并把 Menu.c 里的
+   * MENU_DEBUG_HEADING_LOOP_ENABLED 改为 1。 */
+  /* HAL_TIM_Base_Start_IT(&htim3); */
 
   /* USER CODE END 2 */
 
@@ -204,7 +199,7 @@ int main(void)
     JY901S_Poll();
 
     /* 处理菜单的 PD 监测启停请求, 并上报陀螺仪/PD 数据 */
-    Heading_Task();
+    //Heading_Task();
 
     /* 按键轮询检测(内部按 10ms 间隔采样并消抖) */
     Key_Scan();
