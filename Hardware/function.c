@@ -5,9 +5,26 @@
 #include "Emm_V5.h"
 #include "function.h"
 
-/* ---- 轮子方向定义: 实测反了就把 FORWARD 改成 0, BACKWARD 改成 1 ---- */
-#define WHEEL_DIR_FORWARD       1
-#define WHEEL_DIR_BACKWARD      0
+/* ---- 每个轮子的“正转”方向 ----
+ * Emm_V5 的 dir: 0 = CW, 1 = CCW。
+ * 电机地址与轮子的实际对应关系(实测):
+ *   1 = 左后, 2 = 左前, 3 = 右后, 4 = 右前。
+ *
+ * 自检方法(架空, 启动 target=90 原地左转):
+ *   左后/左前应向后, 右后/右前应向前。
+ *   如果四个轮子都朝同一个方向, 说明 dir 约定整体反了,
+ *   把四个宏一起改成 0 即可; 只有某一个轮子反, 就单独改那一个。 */
+/* 实测结果: dir=1 时, 1/2(左侧)向后, 3/4(右侧)向前。
+ * 所以左侧的前进方向是 dir=0, 右侧的前进方向是 dir=1。 */
+#define WHEEL1_DIR_FORWARD      0   /* 左后 */
+#define WHEEL2_DIR_FORWARD      0   /* 左前 */
+#define WHEEL3_DIR_FORWARD      1   /* 右后 */
+#define WHEEL4_DIR_FORWARD      1   /* 右前 */
+
+static const uint8_t s_wheel_fwd_dir[4] =
+{
+    WHEEL1_DIR_FORWARD, WHEEL2_DIR_FORWARD, WHEEL3_DIR_FORWARD, WHEEL4_DIR_FORWARD
+};
 
 /* 上次修正后车体实际后退, 因此在当前左右轮映射上整体翻转方向。 */
 #define MOTOR_1_DIR_INVERT      0
@@ -72,22 +89,44 @@ void Car_Mecanum(int16_t vx, int16_t vy, int16_t omega)
     };
     uint8_t  i;
 
+<<<<<<< HEAD
     /* 下标 0~3 依次对应电机 1~4 */
     speed[0] = vx + vy + omega;     /* 1 右前 */
     speed[1] = vx - vy + omega;     /* 2 右后 */
     speed[2] = vx - vy - omega;     /* 3 左前 */
     speed[3] = vx + vy - omega;     /* 4 左后 */
+=======
+    /* 下标 0~3 依次对应电机 1~4, 实际接线:
+     *   1 = 左后, 2 = 左前, 3 = 右后, 4 = 右前
+     * 麦轮逆运动学(x 前进, y 左移, omega 逆时针为正):
+     *   左后 = vx + vy - omega
+     *   左前 = vx - vy - omega
+     *   右后 = vx - vy + omega
+     *   右前 = vx + vy + omega */
+    speed[0] = vx + vy - omega;     /* 1 左后 */
+    speed[1] = vx - vy - omega;     /* 2 左前 */
+    speed[2] = vx - vy + omega;     /* 3 右后 */
+    speed[3] = vx + vy + omega;     /* 4 右前 */
+>>>>>>> 6aa30da10ace260ff3d6706d87720cbaf36a82a0
 
     for (i = 0; i < 4; i++)
     {
         if (speed[i] >= 0)
         {
+<<<<<<< HEAD
             dir[i] = dir_invert[i] ? WHEEL_DIR_BACKWARD : WHEEL_DIR_FORWARD;
+=======
+            dir[i] = s_wheel_fwd_dir[i];
+>>>>>>> 6aa30da10ace260ff3d6706d87720cbaf36a82a0
             rpm[i] = (uint16_t)speed[i];
         }
         else
         {
+<<<<<<< HEAD
             dir[i] = dir_invert[i] ? WHEEL_DIR_FORWARD : WHEEL_DIR_BACKWARD;
+=======
+            dir[i] = (uint8_t)(!s_wheel_fwd_dir[i]);
+>>>>>>> 6aa30da10ace260ff3d6706d87720cbaf36a82a0
             rpm[i] = (uint16_t)(-speed[i]);
         }
 

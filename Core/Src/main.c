@@ -36,6 +36,7 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 
+<<<<<<< HEAD
 /* ==================== 航向角 PD 闭环参数 ==================== */
 
 /* PD 参数(上电默认值, 运行中可用 VOFA+ 实时修改):
@@ -52,6 +53,8 @@
 /* 航向死区: 误差小于该角度时输出为零 */
 #define YAW_PID_TOLERANCE       (2.0f)
 
+=======
+>>>>>>> 6aa30da10ace260ff3d6706d87720cbaf36a82a0
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -63,6 +66,7 @@
 
 /* USER CODE BEGIN PV */
 
+<<<<<<< HEAD
 /* ==================== 航向 PD 监测状态 ====================
  * TIM3 中断每 20ms 计算一次 PD 输出, 目前只用于无线串口观察,
  * 不向底盘发送电机命令。
@@ -86,6 +90,8 @@ volatile float   g_yaw_kd = YAW_PID_KD_DEFAULT;
 /* 中断算出的 PD 输出(仅供观察, 当前不驱动电机)。 */
 volatile float   g_yaw_output = 0.0f;
 
+=======
+>>>>>>> 6aa30da10ace260ff3d6706d87720cbaf36a82a0
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -145,6 +151,11 @@ int main(void)
   MX_TIM3_Init();
   /* USER CODE BEGIN 2 */
 
+<<<<<<< HEAD
+=======
+  OLED_Init();
+  OLED_Clear();
+>>>>>>> 6aa30da10ace260ff3d6706d87720cbaf36a82a0
   JY901S_Init();
 
   OLED_ShowString(0, 0, "JY901S init...");
@@ -155,7 +166,6 @@ int main(void)
 
   if (!jy901s_data.ready)
   {
-    /* 读不到数据: 检查 PB6/PB7 接线与 4.7k 上拉电阻 */
     OLED_ShowString(0, 2, "No IMU data!");
     OLED_ShowString(0, 4, "Chk wire+pullup");
     OLED_Refresh();
@@ -163,10 +173,7 @@ int main(void)
   }
   else
   {
-    /* 模块正常: 把回传率从出厂 10Hz 提到 50Hz。
-     * 必须提 —— 出厂 10Hz 是 100ms 才更新一次角度, 而定时器 20ms 就跑一次
-     * PD, 中间几次都在重复算同一个旧数据, 响应会明显滞后、容易振荡。
-     * 该设置写进模块后断电不丢失, 只需生效一次。 */
+    /* 6 轴算法和校准结果已经保存在模块里, 不需要每次上电重复执行 */
     JY901S_SetOutputRate(JY901S_RRATE_50HZ);
   }
 
@@ -174,10 +181,21 @@ int main(void)
   JY901S_ZeroYaw();
   Key_Init();
   Menu_Init();
+<<<<<<< HEAD
 
   /* 初始化无线串口上报(VOFA+ 波形), 只复位内部计时,
    * 串口本身已由 MX_USART2_UART_Init() 配好 */
   //Wireless_Init();
+=======
+  Wireless_Init();
+
+  /* 打开 FPU 自动/惰性压栈。
+   * TIM3 中断里做浮点 PD, 主循环也在做浮点解析; 不打开的话,
+   * 中断抢占主循环时可能破坏 s0-s15 寄存器, 造成偶发数据跳变。 */
+#if (__FPU_PRESENT == 1) && (__FPU_USED == 1)
+  FPU->FPCCR |= FPU_FPCCR_ASPEN_Msk | FPU_FPCCR_LSPEN_Msk;
+#endif
+>>>>>>> 6aa30da10ace260ff3d6706d87720cbaf36a82a0
 
   /* 启动 TIM3 更新中断(20ms 一次), 航向角 PD 运算在中断回调里做。
    * CubeMX 不会自动生成这一句, 不加的话中断永远不会进来。 */
@@ -195,17 +213,19 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    /* I2C 轮询读取 JY901S 姿态数据(内部按 20ms 间隔控制频率) */
     JY901S_Poll();
+<<<<<<< HEAD
 
     /* 处理菜单的 PD 监测启停请求, 并上报陀螺仪/PD 数据 */
     //Heading_Task();
+=======
+    Heading_ApplyOutput();
+>>>>>>> 6aa30da10ace260ff3d6706d87720cbaf36a82a0
 
-    /* 按键轮询检测(内部按 10ms 间隔采样并消抖) */
+    /* VOFA+ 下行命令处理: 没有换行符时靠串口空闲超时解析 */
+    Wireless_Poll();
+
     Key_Scan();
-
-    /* OLED 菜单: 内部处理按键(切换页面/移动光标)并绘制当前页面,
-     * 显示按 100ms 限频刷新。显示内容全部由 Menu.c 负责。 */
     Menu_Run();
   }
   /* USER CODE END 3 */
@@ -258,6 +278,91 @@ void SystemClock_Config(void)
 
 /* USER CODE BEGIN 4 */
 
+/* ==================== 航向角 PD 闭环参数 ==================== */
+
+/* --- 原地转向模式的输出限幅(RPM) ---
+ * 下限: 步进电机转速太低是转不动的, 给一个能转起来的最小值
+ * 上限: 防止误差大时冲太快甩过头 */
+#define YAW_PID_TURN_OUT_MIN    (20.0f)
+#define YAW_PID_TURN_OUT_MAX    (80.0f)
+
+/* --- 边走边修模式的输出限幅(RPM) ---
+ * 这时的输出是叠加在前进速度上的"左右差速修正", 不能太大,
+ * 否则车会甩尾。而且刻意不设下限 —— 误差小修正就小, 走起来才平顺。 */
+#define YAW_PID_DRIVE_OUT_MAX   (60.0f)
+
+/* 到位判定: 航向误差小于这个角度就认为到了, 输出直接归零 */
+#define YAW_PID_TOLERANCE       (2.0f)
+
+/* 电机命令下发间隔(ms):
+ * fish_Step_All_Control() 内部有好几个 HAL_Delay(2), 一次调用要 8ms 以上,
+ * 所以下发必须限频, 不能每 20ms 都发一次。 */
+#define YAW_CMD_INTERVAL_MS     (30u)
+
+#define MODE_START_YAW_TARGET   (0.0f)
+
+/* 启动后停车前的"前进基准速度(RPM)":
+ *   0 = 原地靠 PD 保持航向(不前进, 最安全, 适合先验证航向保持)
+ *   非 0 = 边走边修(车会持续前进, 测试前先把车架空或留出跑道)
+ *
+ * ★ base != 0 时不会自动停: 一边前进一边靠 PD 保持航向,
+ *   除非按 PE0 停车, 否则会一直往前走。 */
+#define MODE_START_DRIVE_BASE   (0)
+
+/* ==================== 航向角 PD 闭环的运行状态 ====================
+ *
+ * 分工:
+ *   TIM3 中断(20ms) -> 上电后一直做 PD 运算, 结果存进 g_yaw_output
+ *   主循环          -> 只有按键启动电机后, 才把结果下发给电机
+ *
+ * 两种工作模式(由 g_drive_base 区分):
+ *   原地转向:  base = 0       (输出有下限, 保证步进电机转得动)
+ *   边走边修:  base != 0     (输出是左右差速修正量, 叠加在 base 上)
+ *
+ * 为什么中断里不发电机命令:
+ *   电机命令函数(Car_Drive / Car_Stop ...)内部有 HAL_Delay(),
+ *   而 HAL_Delay 靠 SysTick 计时, SysTick 优先级(15)比 TIM3(5)低,
+ *   在中断里等待 SysTick 会永久卡死。所以中断只算不发。
+ * ================================================================= */
+
+/* 航向 PD 运算上电后一直运行, 不需要按键使能;
+ * 按键只控制电机启停(见 g_mode_run_request)。 */
+
+/* 电机的"按键启动请求"标志(菜单和电机控制之间的通信变量):
+ *   Menu 模块(主循环)按下/再按下 PE0 时把它翻转,
+ *   Heading_ApplyOutput()(也在主循环)看到变化后执行真正的启动/停车。
+ *
+ * 为什么要绕这一道: 启动/停车最后要调用 Car_Drive() / Car_Stop(),
+ * 它们内部有 HAL_Delay(), 只能放在主循环里执行。
+ *   0 = 请求停车(上电默认), 1 = 请求启动 */
+volatile uint8_t g_mode_run_request = 0;
+
+/* 目标航向(度), 相对 JY901S_ZeroYaw() 的清零点 */
+volatile float   g_yaw_target = 0.0f;
+
+/* 可在线整定的 PD 参数(上电默认值):
+ * 整定时先只调 Kp —— 从小往大加, 加到"转得够快但开始有点晃";
+ * 然后再加 Kd 把晃动压下去。Kd 直接用陀螺仪角速度, 不需要自己差分。
+ * VOFA+ 发 "P6.0" / "D0.4" 即可实时修改。
+ * 中断里直接读, 主循环/接收回调里写, 都是单次 32 位读写, 安全。 */
+volatile float   g_yaw_kp = 4.0f;
+volatile float   g_yaw_kd = 0.0f;
+
+/* 前进基准速度(RPM):
+ *   = 0  -> 原地转向模式(输出有下限, 保证转得动)
+ *   != 0 -> 边走边修模式(输出是差速修正量, 叠加在这个基准速度上) */
+volatile int16_t g_drive_base = 0;
+
+/* 中断算出来的输出(转向修正量, RPM):
+ *   > 0 = 需要往左修正, < 0 = 需要往右修正, 绝对值 = 转速 */
+volatile float   g_yaw_output = 0.0f;
+
+/* 有新结果的标志: 中断算完置 1, 主循环下发或丢弃后清 0 */
+volatile uint8_t g_yaw_output_ready = 0;
+
+/* 电机当前是否已经停车, 防止在目标点反复发 Car_Stop() */
+static uint8_t s_motor_stopped = 1;
+
 /**
   * @brief  定时器中断回调: 航向角 PD 运算
   * @param  htim  触发中断的定时器句柄
@@ -268,7 +373,16 @@ void SystemClock_Config(void)
   *           输出 u   = Kp * err - Kd * gz      (gz 是陀螺仪 Z 轴角速度)
   *           限幅后存进 g_yaw_output, 供串口监测, 不驱动底盘
   *
+<<<<<<< HEAD
   *         中断内只做数值运算, 不进行阻塞式外设操作。
+=======
+  *         每 40ms 通过 USART2 DMA 上报一次 VOFA+ 波形。
+  *
+  *         ★ 中断里绝对不能调用 HAL_Delay() 和任何内部用到它的函数
+  *           (Car_Drive / Car_Stop / fish_Step_All_Control ...)。
+  *           因为 HAL_Delay 靠 SysTick 累加计时, 而 SysTick 优先级是 15
+  *           (最低), 比 TIM3 的 5 低, 一旦在中断里等 SysTick 就永久卡死。
+>>>>>>> 6aa30da10ace260ff3d6706d87720cbaf36a82a0
   */
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
@@ -279,12 +393,6 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 
     /* 这个回调是所有定时器共用的, 先确认是 TIM3 触发 */
     if (htim->Instance != TIM3)
-    {
-        return;
-    }
-
-    /* 闭环没启动就什么都不做, 保证中断尽可能轻 */
-    if (!g_yaw_loop_enable)
     {
         return;
     }
@@ -339,9 +447,35 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
         g_yaw_output = u;
     }
 
+<<<<<<< HEAD
 }
 
 void Heading_Task(void)
+=======
+    /* 告诉主循环"有新结果可以下发了" */
+    g_yaw_output_ready = 1;
+
+    /* VOFA+ 上报放在中断里, 不受主循环 I2C/OLED/电机命令阻塞的影响。
+     * Wireless_SendYaw() 内部用 DMA + 40ms 限频, 非阻塞。 */
+    Wireless_ReportYaw();
+}
+
+/**
+  * @brief  把中断算出的航向输出下发给电机(主循环里反复调用)
+  * @note   内部做了三件事:
+  *           1. 限频 30ms —— fish_Step_All_Control() 一次要 8ms 以上
+  *           2. (基准速度, 修正量) 没变化就不重发 —— 电机收到后会保持
+  *           3. 走 Car_Drive(), 也就是麦轮的"前进 + 自转修正"合成
+  *
+  *         两种工况都由 Car_Drive() 统一处理, 不需要分支:
+  *           原地转向: base = 0,   turn = 输出  -> 右轮正转/左轮反转, 原地打转
+  *           边走边修: base = 转速, turn = 输出  -> 左右轮差速, 边跑边纠偏
+  *           已经到位(base = 0 且 turn = 0)     -> 停车
+  *
+  *         VOFA+ 波形上报已经移到 TIM3 中断里, 不受主循环阻塞影响。
+  */
+void Heading_ApplyOutput(void)
+>>>>>>> 6aa30da10ace260ff3d6706d87720cbaf36a82a0
 {
     static uint8_t s_applied_request = 0;
 
@@ -360,7 +494,120 @@ void Heading_Task(void)
         }
     }
 
+<<<<<<< HEAD
     Wireless_ReportYaw();
+=======
+    /* ---- 电机没启动: PD 照常计算, 但结果不下发 ----
+     * 清掉 ready, 避免停止期间积压的结果在下次启动时被误发。 */
+    if (!g_mode_run_request)
+    {
+        g_yaw_output_ready = 0;
+        return;
+    }
+
+    /* 中断还没有算出新结果, 直接返回 */
+    if (!g_yaw_output_ready)
+    {
+        return;
+    }
+
+    /* 限频: 上一次下发还没过 30ms 就先不发 */
+    now = HAL_GetTick();
+    if ((now - last_cmd_tick) < YAW_CMD_INTERVAL_MS)
+    {
+        return;
+    }
+
+    last_cmd_tick      = now;
+    g_yaw_output_ready = 0;
+
+    base = g_drive_base;
+    turn = (int16_t)g_yaw_output;   /* float 转整数, 顺带滤掉小于 1 转的抖动 */
+
+    if ((base == 0) && (turn == 0))
+    {
+        /* 原地转向模式 + 已经到位 -> 停车(只在第一次进入时发) */
+        if (!s_motor_stopped)
+        {
+            s_motor_stopped = 1;
+            Car_Stop();
+        }
+    }
+    else
+    {
+        /* 麦轮: 前进 + 自转修正 */
+        s_motor_stopped = 0;
+        Car_Drive(base, turn);
+    }
+}
+
+/**
+  * @brief  启动电机(内部使用, 只能在主循环里调用)
+  * @note   PD 运算本来就在中断里一直跑, 这里只准备电机启动参数。
+  *         g_yaw_output_ready 置 1 是为了让主循环下一拍立刻把 PD 输出发出去。
+  */
+static void heading_do_start(void)
+{
+    g_yaw_target       = MODE_START_YAW_TARGET;
+    g_drive_base       = MODE_START_DRIVE_BASE;
+    g_yaw_output       = 0.0f;
+    g_yaw_output_ready = 1;                    /* 强制下发一次初始命令 */
+    s_motor_stopped    = 0;
+
+    Car_Drive(g_drive_base, 0);
+}
+
+/**
+  * @brief  停止电机(内部使用, 只能在主循环里调用)
+  * @note   PD 运算不受影响, 仍会继续更新 g_yaw_output。
+  */
+static void heading_do_stop(void)
+{
+    g_drive_base       = 0;
+    g_yaw_output       = 0.0f;
+    g_yaw_output_ready = 0;
+    s_motor_stopped    = 1;
+
+    Car_Stop();
+}
+
+/**
+  * @brief  处理菜单(模式选择页)发来的启动/停车请求(主循环里反复调用)
+  * @note   和菜单模块之间靠 g_mode_run_request 这个标志通信:
+  *             标志变化 -> 执行启动或停车
+  *         上一状态记在模块内部, 所以反复调用不会重复动作,
+  *         只在标志真正翻转的那一次才干活。
+  */
+void Heading_UpdateRunState(void)
+{
+    static uint8_t s_applied = 0;   /* 已经执行过的请求值(上电默认停车) */
+
+    if (g_mode_run_request == s_applied)
+    {
+        return;                     /* 没有新请求 */
+    }
+
+    s_applied = g_mode_run_request;
+
+    if (s_applied)
+    {
+        /* IMU 没读到数据时禁止启动:
+         * 否则 yaw 一直是 0, 目标 90° 会让车开环一直转。
+         * 把请求清回 0, 让菜单状态也回到 STOP。 */
+        if (!jy901s_data.ready)
+        {
+            g_mode_run_request = 0;
+            s_applied = 0;
+            return;
+        }
+
+        heading_do_start();
+    }
+    else
+    {
+        heading_do_stop();
+    }
+>>>>>>> 6aa30da10ace260ff3d6706d87720cbaf36a82a0
 }
 
 /* USER CODE END 4 */
