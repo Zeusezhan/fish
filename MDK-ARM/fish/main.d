@@ -28,4 +28,5 @@ fish/main.o: ..\Core\Src\main.c ..\Core\Inc\main.h \
   ..\Core\Inc\dma.h ..\Core\Inc\i2c.h ..\Core\Inc\tim.h \
   ..\Core\Inc\usart.h ..\Core\Inc\gpio.h ..\Hardware\jy901s.h \
   ..\Hardware\OLED.h ..\Hardware\key.h ..\Hardware\Menu.h \
-  ..\Hardware\wireless_uart.h
+  ..\Hardware\wireless_uart.h ..\Hardware\function.h \
+  ..\Hardware\Emm_V5.h

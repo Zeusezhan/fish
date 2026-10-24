@@ -5,38 +5,89 @@
 #include "Emm_V5.h"
 #include "function.h"
 
-/* ---- 每个轮子的“正转”方向 ----
- * Emm_V5 的 dir: 0 = CW, 1 = CCW。
- * 电机地址与轮子的实际对应关系(实测):
- *   1 = 左后, 2 = 左前, 3 = 右后, 4 = 右前。
+/* ---- 轮子方向约定 ---- */
+/* Emm_V5 的 dir: 0 = CW, 1 = CCW。 */
+#define WHEEL_DIR_FORWARD       1
+#define WHEEL_DIR_BACKWARD      0
+
+/* 【电机地址与本车轮子的实际对应关系】
+ *   1 = 右前, 2 = 右后, 3 = 左前, 4 = 左后
  *
- * 自检方法(架空, 启动 target=90 原地左转):
- *   左后/左前应向后, 右后/右前应向前。
- *   如果四个轮子都朝同一个方向, 说明 dir 约定整体反了,
- *   把四个宏一起改成 0 即可; 只有某一个轮子反, 就单独改那一个。 */
-/* 实测结果: dir=1 时, 1/2(左侧)向后, 3/4(右侧)向前。
- * 所以左侧的前进方向是 dir=0, 右侧的前进方向是 dir=1。 */
-#define WHEEL1_DIR_FORWARD      0   /* 左后 */
-#define WHEEL2_DIR_FORWARD      0   /* 左前 */
-#define WHEEL3_DIR_FORWARD      1   /* 右后 */
-#define WHEEL4_DIR_FORWARD      1   /* 右前 */
+ * 【历史记录 —— 不要随意改这套映射】
+ *   10.23 版本(commit 73dad5c) 用下面这套映射, 前进/后退/左移/右移/
+ *   自转全部实测正确。清理合并冲突时曾误用远程分支另一套映射
+ *   (1=左后 2=左前 3=右后 4=右前), 导致前进变后退、右移变左移。
+ *   现已恢复为本车实测的版本。
+ *
+ *   注意: 下面的宏必须和 Car_Mecanum() 里的 speed[] 注释配套使用,
+ *         它们共同描述"哪个编号是哪个轮子"。只改一边必然跑偏。
+ *
+ * 【自检方法】
+ *   架空车, 在菜单 Debug → Single Seg 里选 FWD 跑 1 秒:
+ *     四个轮子都应朝车头方向转。
+ *   若只有一个轮子反, 单独改那一个 MOTORx_DIR_INVERT;
+ *   若四个全反, 才把 WHEELx_DIR_FORWARD 四个一起取反。 */
+#define WHEEL1_DIR_FORWARD      WHEEL_DIR_FORWARD   /* 右前 */
+#define WHEEL2_DIR_FORWARD      WHEEL_DIR_FORWARD   /* 右后 */
+#define WHEEL3_DIR_FORWARD      WHEEL_DIR_FORWARD   /* 左前 */
+#define WHEEL4_DIR_FORWARD      WHEEL_DIR_FORWARD   /* 左后 */
 
-static const uint8_t s_wheel_fwd_dir[4] =
-{
-    WHEEL1_DIR_FORWARD, WHEEL2_DIR_FORWARD, WHEEL3_DIR_FORWARD, WHEEL4_DIR_FORWARD
-};
-
-/* 上次修正后车体实际后退, 因此在当前左右轮映射上整体翻转方向。 */
-#define MOTOR_1_DIR_INVERT      0
-#define MOTOR_2_DIR_INVERT      0
-#define MOTOR_3_DIR_INVERT      1
-#define MOTOR_4_DIR_INVERT      1
+/* 个别轮子的安装方向相反, 需要单独翻转。
+ * 实测: 3/4 号(左侧两个轮子)与 1/2 号(右侧)安装方向相反,
+ * 所以左侧轮子要整体取反, 才能和右侧一起把车往前推。 */
+#define MOTOR_1_DIR_INVERT      0   /* 右前: 不翻转 */
+#define MOTOR_2_DIR_INVERT      0   /* 右后: 不翻转 */
+#define MOTOR_3_DIR_INVERT      1   /* 左前: 翻转 */
+#define MOTOR_4_DIR_INVERT      1   /* 左后: 翻转 */
 
 /* 电机允许的最高转速(RPM), 由 Emm_V5 驱动器限制 */
 #define CAR_MAX_RPM             5000
 
 /* 加减速档位, 传给 Emm_V5 的 acc 参数(0 表示直接换向, 越大加速越急) */
 #define CAR_ACC                 5
+
+/**
+  * @brief  进入 / 退出"底盘命令临界区"
+  * @note   Emm_V5 的速度命令用 DMA 发送, 而命令缓冲区是函数内的局部数组。
+  *         如果一条命令的 DMA 还没有发完, 又一次进到这里(例如 TIM3
+  *         中断里的上报逻辑插进来), 缓冲区就会失效, 发出去的是乱码帧,
+  *         那个电机就"收不到命令"。
+  *
+  *         临界区期间屏蔽 TIM3 中断, 保证同一时刻只有一条底盘命令
+  *         序列在拼帧/发送。串口的传输完成中断仍允许, 发送不会卡死。
+  *
+  *         ★ 临界区内不要放 HAL_Delay: 只包住"打包 + 启动 DMA"这一小段。
+  */
+static void car_cmd_enter(void)
+{
+    NVIC_DisableIRQ(TIM3_IRQn);
+}
+
+static void car_cmd_exit(void)
+{
+    NVIC_EnableIRQ(TIM3_IRQn);
+}
+
+/**
+  * @brief  向底盘串口发一帧命令(阻塞发送, 单帧发送期间屏蔽 TIM3)
+  * @note   ★ 这是"电机收不到停止命令"的根因之一, 不要去掉保护。
+  *
+  *         TIM3(20ms) 中断里如果去发 VOFA+/无线数据, 就可能正好插在
+  *         Car_Stop() 这几帧之间。一旦某一帧(典型是地址 1 的第一帧)
+  *         被别的数据盖掉, 该驱动器就不会进入"缓存停车"状态,
+  *         最后一帧广播同步时它照旧按老速度跑 —— 表现就是
+  *         "1 号电机收不到停止命令"。
+  */
+static HAL_StatusTypeDef car_uart_send(const uint8_t *buf, uint16_t len)
+{
+    HAL_StatusTypeDef st;
+
+    car_cmd_enter();
+    st = HAL_UART_Transmit(&huart1, (uint8_t *)buf, len, 20);
+    car_cmd_exit();
+
+    return st;
+}
 
 /**
   * @brief  底层: 分别设定四个电机的方向和速度, 最后广播同步启动
@@ -54,17 +105,27 @@ void fish_Step_All_Control(uint8_t dir1, uint16_t vel1,
                            uint8_t dir4, uint16_t vel4)
 {
     /* 1. 分别设定四个电机速度, snF=true: 命令先缓存, 等待同步触发 */
+    car_cmd_enter();
     Emm_V5_Vel_Control(1, dir1, vel1, CAR_ACC, true);
+    car_cmd_exit();
     HAL_Delay(2);
+    car_cmd_enter();
     Emm_V5_Vel_Control(2, dir2, vel2, CAR_ACC, true);
+    car_cmd_exit();
     HAL_Delay(2);
+    car_cmd_enter();
     Emm_V5_Vel_Control(3, dir3, vel3, CAR_ACC, true);
+    car_cmd_exit();
     HAL_Delay(2);
+    car_cmd_enter();
     Emm_V5_Vel_Control(4, dir4, vel4, CAR_ACC, true);
+    car_cmd_exit();
     HAL_Delay(2);
 
     /* 2. 广播同步触发(地址 0x00 为广播地址), 四个电机同时转 */
+    car_cmd_enter();
     Emm_V5_Synchronous_motion(0x00);
+    car_cmd_exit();
 }
 
 /**
@@ -89,44 +150,31 @@ void Car_Mecanum(int16_t vx, int16_t vy, int16_t omega)
     };
     uint8_t  i;
 
-<<<<<<< HEAD
-    /* 下标 0~3 依次对应电机 1~4 */
+    /* 下标 0~3 依次对应电机 1~4, 实际接线:
+     *   1 = 右前, 2 = 右后, 3 = 左前, 4 = 左后
+     * 麦轮逆运动学(x 前进, y 左移, omega 逆时针为正):
+     *   右前 = vx + vy + omega
+     *   右后 = vx - vy + omega
+     *   左前 = vx - vy - omega
+     *   左后 = vx + vy - omega
+     *
+     * ★ 这套顺序是和上面的 WHEELx_DIR_FORWARD / MOTORx_DIR_INVERT
+     *   配套实测出来的, 修改前请先看文件顶部的说明。 */
     speed[0] = vx + vy + omega;     /* 1 右前 */
     speed[1] = vx - vy + omega;     /* 2 右后 */
     speed[2] = vx - vy - omega;     /* 3 左前 */
     speed[3] = vx + vy - omega;     /* 4 左后 */
-=======
-    /* 下标 0~3 依次对应电机 1~4, 实际接线:
-     *   1 = 左后, 2 = 左前, 3 = 右后, 4 = 右前
-     * 麦轮逆运动学(x 前进, y 左移, omega 逆时针为正):
-     *   左后 = vx + vy - omega
-     *   左前 = vx - vy - omega
-     *   右后 = vx - vy + omega
-     *   右前 = vx + vy + omega */
-    speed[0] = vx + vy - omega;     /* 1 左后 */
-    speed[1] = vx - vy - omega;     /* 2 左前 */
-    speed[2] = vx - vy + omega;     /* 3 右后 */
-    speed[3] = vx + vy + omega;     /* 4 右前 */
->>>>>>> 6aa30da10ace260ff3d6706d87720cbaf36a82a0
 
     for (i = 0; i < 4; i++)
     {
         if (speed[i] >= 0)
         {
-<<<<<<< HEAD
             dir[i] = dir_invert[i] ? WHEEL_DIR_BACKWARD : WHEEL_DIR_FORWARD;
-=======
-            dir[i] = s_wheel_fwd_dir[i];
->>>>>>> 6aa30da10ace260ff3d6706d87720cbaf36a82a0
             rpm[i] = (uint16_t)speed[i];
         }
         else
         {
-<<<<<<< HEAD
             dir[i] = dir_invert[i] ? WHEEL_DIR_FORWARD : WHEEL_DIR_BACKWARD;
-=======
-            dir[i] = (uint8_t)(!s_wheel_fwd_dir[i]);
->>>>>>> 6aa30da10ace260ff3d6706d87720cbaf36a82a0
             rpm[i] = (uint16_t)(-speed[i]);
         }
 
@@ -218,8 +266,10 @@ void Car_TurnRight(uint16_t vel)
   *         最后用广播地址 0x00 发同步触发, 四台拿到同一条帧,
   *         因此停止动作是同时发生的, 车不会先偏一下。
   *
-  *         和 _DMA 版本的差别: 这里逐条阻塞发送并留出间隔,
-  *         不会出现 DMA 还在发上一帧、下一帧被丢弃的情况。
+  *         每一帧都用 car_uart_send() 发送(发送期间屏蔽 TIM3),
+  *         保证 4 帧停止命令 + 1 帧同步触发不会被别处的上报数据插入。
+  *         这里不用 Emm_V5_Stop_Now(), 因为它走 DMA 发送、函数
+  *         立刻返回, 紧接着的同步帧可能抢在停止帧前面发出去。
   */
 uint8_t Car_Stop(void)
 {
@@ -227,6 +277,12 @@ uint8_t Car_Stop(void)
     uint8_t stop_cmd[5];
     uint8_t sync_cmd[4];
     uint8_t ok = 1u;
+
+    /* 广播同步帧: 地址 0x00 + 0xFF 0x66 + 结束符 */
+    sync_cmd[0] = 0x00;
+    sync_cmd[1] = 0xFF;
+    sync_cmd[2] = 0x66;
+    sync_cmd[3] = 0x6B;
 
     for (motor_id = 1u; motor_id <= 4u; motor_id++)
     {
@@ -236,28 +292,28 @@ uint8_t Car_Stop(void)
         stop_cmd[3] = 1u;           /* snF=1: 先缓存, 等广播同步 */
         stop_cmd[4] = 0x6B;
 
-        if (HAL_UART_Transmit(&huart1, stop_cmd, sizeof(stop_cmd), 20) != HAL_OK)
+        if (car_uart_send(stop_cmd, sizeof(stop_cmd)) != HAL_OK)
         {
             ok = 0u;
         }
         HAL_Delay(2);
     }
 
-    /* 广播同步: 四台收到同一条帧, 同时执行缓存里的停止动作 */
-    sync_cmd[0] = 0x00;
-    sync_cmd[1] = 0xFF;
-    sync_cmd[2] = 0x66;
-    sync_cmd[3] = 0x6B;
+    /* ★ 关键: 同步帧之前必须给驱动器留出"处理完最后一帧"的时间。
+     *
+     *   HAL_Delay(2) 只能保证数据从 STM32 发出去了, 不能保证驱动器
+     *   已经把它写进内部的同步缓存。115200 下一帧 5 字节约 0.43ms,
+     *   4 号帧发完到同步帧发出之间几乎没有间隙; 如果驱动器正在
+     *   处理自身的中断/写入, 就会漏掉这帧停止命令 —— 而漏掉的
+     *   往往就是最先收到、看起来"最来得及"的 1 号电机。
+     *
+     *   这正是"跑很多次才偶发一次地址 1 收不到停止"的来源。
+     *   这里额外等 5ms, 让四台都完成缓存写入再广播同步。 */
+    HAL_Delay(5);
 
-    if (HAL_UART_Transmit(&huart1, sync_cmd, sizeof(sync_cmd), 20) != HAL_OK)
-    {
-        ok = 0u;
-    }
-
-    /* 兜底: 若同步帧丢失, 四台会一直挂在缓存状态按旧速度跑,
-     * 这里再补一次广播, 让缓存的停止动作真正落地。 */
-    HAL_Delay(2);
-    if (HAL_UART_Transmit(&huart1, sync_cmd, sizeof(sync_cmd), 20) != HAL_OK)
+    /* 广播同步: 四台收到同一条帧, 同时执行缓存里的停止动作.
+     * 只发一次 —— 以前补发第二次会让驱动器多同步一次, 干扰下段运动。 */
+    if (car_uart_send(sync_cmd, sizeof(sync_cmd)) != HAL_OK)
     {
         ok = 0u;
     }
@@ -283,7 +339,7 @@ uint8_t Car_SetEnabled(uint8_t enabled)
         cmd[4] = 0;
         cmd[5] = 0x6B;
 
-        if (HAL_UART_Transmit(&huart1, cmd, sizeof(cmd), 20) != HAL_OK)
+        if (car_uart_send(cmd, sizeof(cmd)) != HAL_OK)
         {
             return 0;
         }
@@ -317,7 +373,7 @@ uint8_t Car_ReadPositionCount(uint8_t motor_id, int32_t *position)
     cmd[1] = 0x36;
     cmd[2] = 0x6B;
 
-    if (HAL_UART_Transmit(&huart1, cmd, sizeof(cmd), 20) != HAL_OK)
+    if (car_uart_send(cmd, sizeof(cmd)) != HAL_OK)
     {
         return 0;
     }
@@ -401,7 +457,7 @@ uint8_t Car_ResetPositionCounts(void)
         cmd[2] = 0x6D;
         cmd[3] = 0x6B;
 
-        if (HAL_UART_Transmit(&huart1, cmd, sizeof(cmd), 20) != HAL_OK)
+        if (car_uart_send(cmd, sizeof(cmd)) != HAL_OK)
         {
             return 0;
         }

@@ -34,6 +34,8 @@ static float    jy_zero_base = 0.0f;
 static uint32_t jy_next_poll_tick = 0;   /* 下一次允许读取的时刻 */
 static uint8_t  jy_first_poll = 1;       /* 1 = 第一次调用立刻读, 不等间隔 */
 static uint8_t  jy_fail_cnt = 0;         /* 连续读取失败次数 */
+static uint32_t jy_update_tick = 0;      /* 最近一次成功解析数据的时刻 */
+static uint8_t  jy_diag_latch = 0;       /* 本次读取中发生过容差比对失败 */
 
 /* ==================== I2C 底层 ==================== */
 
@@ -225,6 +227,7 @@ static void jy_parse_regs(const int16_t *reg)
 
     jy_update_yaw_outputs();
     jy901s_data.ready = 1;
+    jy_update_tick = HAL_GetTick();
 }
 
 /* ==================== 对外接口 ==================== */
@@ -254,18 +257,107 @@ void JY901S_Init(void)
 }
 
 /**
+  * @brief  进入"正在写 jy901s_data"状态, 期间屏蔽 TIM3 中断
+  * @note   TIM3 的航向 PD 中断优先级(5)高于 SysTick(15),
+  *         可以在主循环的 I2C 传输中途抢占; 不屏蔽的话,
+  *         中断可能读到"改了一半"的 yaw, 表现为航向角偶发跳变。
+  */
+void JY901S_BeginUpdate(void)
+{
+    NVIC_DisableIRQ(TIM3_IRQn);
+}
+
+/**
+  * @brief  结束写状态, 恢复 TIM3 中断
+  */
+void JY901S_EndUpdate(void)
+{
+    NVIC_EnableIRQ(TIM3_IRQn);
+}
+
+/**
+  * @brief  取一份数据快照(中断里调用)
+  * @param  out  输出缓冲区
+  * @retval 1 = 有效, 0 = 还没收到过数据
+  */
+uint8_t JY901S_TryRead(JY901S_Data_t *out)
+{
+    if ((out == NULL) || (jy901s_data.ready == 0u))
+    {
+        return 0;
+    }
+
+    *out = jy901s_data;
+    return 1;
+}
+
+/**
+  * @brief  最近一次成功读到数据的时刻
+  * @retval HAL_GetTick() 时基的毫秒值
+  */
+uint32_t JY901S_GetUpdateTick(void)
+{
+    return jy_update_tick;
+}
+
+/**
+  * @brief  取出并清除"上次读取是否发生过容差比对失败"的标志
+  * @retval 1 = 发生过(说明这帧跨了模块刷新点, 或总线有误码), 0 = 没有
+  * @note   用途是区分两类失败:
+  *           调用 JY901S_ReadOnce() 返回 1, 但本标志为 0
+  *             -> HAL 层的 I2C 传输本身就失败了(无应答/超时)
+  *           调用返回 1, 且本标志为 1
+  *             -> 传输成功, 但两次读到的数据差太多
+  *         后者比例很高时, 通常是外部上拉不足导致误码,
+  *         或者是模块回传率太低(10Hz), 20ms 一读总是跨刷新点。
+  */
+uint8_t JY901S_TakeDiagLatch(void)
+{
+    uint8_t v = jy_diag_latch;
+
+    jy_diag_latch = 0u;
+    return v;
+}
+
+/**
+  * @brief  当前生效的 I2C 总线速率(Hz)
+  * @note   传输失败时驱动会自动降速重试, 该值会随之变小,
+  *         所以"速率掉到 100k 以下"本身就是信号质量差的证据。
+  */
+uint32_t JY901S_GetBusSpeed(void)
+{
+    return JY901S_I2C_HANDLE->Init.ClockSpeed;
+}
+
+/**
   * @brief  立即读取一次姿态数据并解析
-  * @retval 0 = 成功, 1 = I2C 通信失败(数据保持上一次的值不变)
+  * @retval 0 = 成功, 1 = I2C 通信失败或整帧数据无效
   * @note   一次读取 0x34~0x3F 共 12 个寄存器(24 字节):
   *         加速度 AX~AZ + 角速度 GX~GZ + 磁场 HX~HZ + 角度 Roll/Pitch/Yaw
+  *
+  *         ★ 为什么要"读两次比对":
+  *           模块按自己的节拍刷新寄存器(出厂 10Hz), 如果读取的 24 字节
+  *           正好跨在它刷新的瞬间, 就会拿到"一半旧一半新"的帧 ——
+  *           这种帧的 Yaw 会突然跳几十度, 直接喂给 PID 会导致猛打方向。
+  *
+  *         ★ 为什么用"容差"而不是"完全相同":
+  *           内部弱上拉(约 40kΩ)驱动 100kHz 时边沿很慢, 偶发单字节
+  *           误码是正常的。只要两次读到的是同一个采样点, 数值只会因为
+  *           噪声差几个 LSB; 而跨刷新点造成的差异是成百上千 LSB。
+  *           用 JY901S_BURST_TOLERANCE 分界, 既不会误杀好帧,
+  *           也能可靠拦住"半新半旧"的帧。
   */
 uint8_t JY901S_ReadOnce(void)
 {
     uint8_t buf[JY901S_REG_BYTES];
+    uint8_t chk[JY901S_REG_BYTES];
     int16_t reg[JY901S_REG_NUM];
     uint8_t i;
     uint8_t all_zero = 1u;
     uint8_t all_ff   = 1u;
+
+    /* 读总线期间不用动中断: 数据还没开始解析 */
+    jy_diag_latch = 0u;
 
     if (jy_i2c_read_regs(JY901S_REG_AX, buf, JY901S_REG_BYTES) != 0)
     {
@@ -291,23 +383,57 @@ uint8_t JY901S_ReadOnce(void)
         return 1;
     }
 
+    /* ---- 相邻两次读取的容差比对 ----
+     * 同一个采样点的两次读取, 差值应该只有几个 LSB;
+     * 差值超过 JY901S_BURST_TOLERANCE 说明跨过了模块刷新点, 丢弃本次。
+     * 比对失败也计入总线诊断, 便于判断是"刷新跨帧"还是"信号质量差"。 */
+    if (jy_i2c_read_regs(JY901S_REG_AX, chk, JY901S_REG_BYTES) != 0)
+    {
+        jy_diag_latch = 1u;
+        return 1;
+    }
+
+    for (i = 0; i < JY901S_REG_NUM; i++)
+    {
+        /* 按寄存器(小端 16 位)比较, 不是按字节, 避免把高位进位误判成噪声 */
+        int16_t a = (int16_t)(((uint16_t)buf[i * 2 + 1] << 8) | buf[i * 2]);
+        int16_t b = (int16_t)(((uint16_t)chk[i * 2 + 1] << 8) | chk[i * 2]);
+        int32_t d = (int32_t)a - (int32_t)b;
+
+        if (d < 0)
+        {
+            d = -d;
+        }
+
+        if (d > JY901S_BURST_TOLERANCE)
+        {
+            jy_diag_latch = 1u;
+            return 1;
+        }
+    }
+
     for (i = 0; i < JY901S_REG_NUM; i++)
     {
         /* 维特智能 I2C 数据是小端: 低字节在前 */
         reg[i] = (int16_t)(((uint16_t)buf[i * 2 + 1] << 8) | buf[i * 2]);
     }
 
+    /* 解析 + 写 jy901s_data 必须整段完成, 期间不让 TIM3 抢占 */
+    JY901S_BeginUpdate();
     jy_parse_regs(reg);
+    JY901S_EndUpdate();
+
     return 0;
 }
 
 /**
   * @brief  轮询读取(主循环里反复调用)
+  * @retval 0 = 本次成功读到数据, 1 = 读取失败, 2 = 还没到读取时刻
   * @note   内部按 JY901S_POLL_INTERVAL_MS 限频, 默认 20ms 读一次。
   *         因为主循环跑得很快, 这样写可以让调用方不用自己管理定时,
   *         又能保证每次拿到的都是最新数据。
   */
-void JY901S_Poll(void)
+uint8_t JY901S_Poll(void)
 {
     uint32_t now = HAL_GetTick();
     uint8_t  ret;
@@ -315,7 +441,7 @@ void JY901S_Poll(void)
     /* 第一次调用不等待, 立刻读一帧, 缩短上电后的数据准备时间 */
     if (!jy_first_poll && ((int32_t)(now - jy_next_poll_tick) < 0))
     {
-        return;
+        return 2u;
     }
     jy_first_poll = 0;
 
@@ -336,6 +462,8 @@ void JY901S_Poll(void)
         jy_next_poll_tick = HAL_GetTick() +
             ((jy_fail_cnt >= 5u) ? JY901S_POLL_RETRY_MS : JY901S_POLL_INTERVAL_MS);
     }
+
+    return ret;
 }
 
 /**
@@ -345,8 +473,10 @@ void JY901S_Poll(void)
   */
 void JY901S_ZeroYaw(void)
 {
+    JY901S_BeginUpdate();
     jy_zero_base = jy_yaw_unwrapped_raw;
     jy_update_yaw_outputs();
+    JY901S_EndUpdate();
 }
 
 /**

@@ -30,8 +30,9 @@ extern volatile float   g_yaw_target;
 extern volatile float   g_yaw_output;
 
 /* 调试页航向闭环开关: 1 = 启动时记录目标航向并下发纠偏命令。
- * 当前 TIM3 中断被注释停用, 所以这里保持 0, 只做纯底盘调试。 */
-#define MENU_DEBUG_HEADING_LOOP_ENABLED   0
+ * ★ 只有它和 main.c 里的 HAL_TIM_Base_Start_IT(&htim3) 同时打开,
+ *   PD 才会真正算出来并下发; 少了任何一个都会退化成开环运动。 */
+#define MENU_DEBUG_HEADING_LOOP_ENABLED   1
 
 #define MENU_DEBUG_SPEED_RPM       50u
 
@@ -40,6 +41,9 @@ extern volatile float   g_yaw_output;
 
 /* 航向环输出刷新周期(ms), 与 TIM3 的 20ms 运算周期一致 */
 #define MENU_DEBUG_STEER_MS        20u
+
+/* 跑动中多久没读到新数据就认为陀螺仪掉线(ms), 掉线立即停车 */
+#define MENU_DEBUG_IMU_TIMEOUT_MS  100u
 
 /* 秒数以 0.1 秒为单位保存, 便于用整数精确计时 */
 #define MENU_DEBUG_MIN_TENTH_SECONDS    10u     /* 1.0 秒 */
@@ -645,17 +649,38 @@ static void menu_debug_stop(void)
 
 /* 运行中按 MENU_DEBUG_STEER_MS 刷新底盘命令, 让航向修正真正下发。
  * 不能每次主循环都发: Car_Mecanum 内部有 4 个 HAL_Delay(2),
- * 每圈都发会把主循环和菜单刷新拖慢。 */
+ * 每圈都发会把主循环和菜单刷新拖慢。
+ *
+ * ★ 控制流是"主循环按 20ms 定时下发 + 中断只算不填", 所以即使
+ *   PD 中断没有及时算出新值, 车也会按最后一拍的修正量继续走,
+ *   不会因为一次中断丢拍就停在那里等。 */
 static void menu_debug_steer(uint32_t now)
 {
+    uint32_t imu_tick;
+
     /* 停车锁优先: 停车期间绝不能再下发任何速度命令 */
-    if (s_debug_stop_lock || !s_debug_running || !s_debug_heading_hold)
+    if (s_debug_stop_lock || !s_debug_running)
     {
         return;
     }
 
     if ((int32_t)(now - s_debug_next_steer_tick) < 0)
     {
+        return;
+    }
+
+    /* ---- IMU 掉线保护 ----
+     * 跑动中如果陀螺仪读数停了, 继续用最后一拍修正量会越修越偏,
+     * 这里直接停车, 避免车带着错误航向乱跑。
+     * 判定依据: 主循环每 20ms 调一次 JY901S_Poll(), 读数停了
+     * 就说明 I2C 出问题了。 */
+    imu_tick = JY901S_GetUpdateTick();
+    if ((jy901s_data.ready == 0u)
+        || ((uint32_t)(now - imu_tick) > MENU_DEBUG_IMU_TIMEOUT_MS))
+    {
+        menu_debug_stop();
+        s_debug_status = "IMU LOST";
+        s_need_redraw = 1u;
         return;
     }
 
