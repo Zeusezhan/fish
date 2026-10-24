@@ -6,24 +6,20 @@
  * OLED 显示菜单
  *
  * 【页面结构】
- *   第一页  选择界面 MENU_PAGE_MAIN
- *             ├─ Parameters   -> 参数界面(航向角 / 俯仰角)
- *             └─ Debug        -> 定时运动与底盘位置计数
- *   子界面   参数界面 MENU_PAGE_PARAM
- *            调试界面 MENU_PAGE_DEBUG
+ *   第一页  选择界面
+ *             ├─ Auto Run   -> 自动执行五段跑图
+ *             └─ Single Seg -> 单段调试
+ *   子界面   自动跑图 / 单段调试
  *
  * 【按键操作】按键定义见 key.h
- *   第一页(选择界面):
- *       PE1 (KEY_2) = 选择下一个        光标往下移, 到底后回到第一个
- *       PE0 (KEY_1) = 确定              进入光标所指的界面
- *   参数界面:
- *       PE2 (KEY_3) = 返回              回到第一页
- *   调试界面: 停车时 PE0 短按循环选择前进/左移/右移/后退, 长按启动;
- *              运行中 PE0 立即停车。PE1/PE2 短按调秒, 长按清零/返回。
- *              启动时若陀螺仪已就绪, 自动把当前航向设为目标,
- *              四种方向都用 g_yaw_output 做航向保持;
- *              陀螺仪未就绪时只发原始命令并在屏幕上提示。
- *              清零后会读回验证, 成功后节点号递增; 秒数范围为 1~99 秒。
+ *   选择界面:
+ *       PE1 (KEY_2) = 切换 Auto Run / Single Seg
+ *       PE0 (KEY_1) = 确定              自动跑图立即开始或进入单段调试
+ *   Auto Run: 进入后自动执行五段；运行中 PE0 停止，结束/停止后长按 PE0 重跑；
+ *             空闲时长按 PE2 返回选择页。状态机位于 Function/InertialRun.c。
+ *   Single Seg: 停车时 PE0 短按选方向、长按启动；运行中 PE0 停车。
+ *               PE1/PE2 短按调秒，PE1 长按清零，PE2 长按返回。
+ *               秒数范围为 1~99 秒，启动时若陀螺仪就绪则保持航向。
  *
  * 【使用方法】
  *   1. 上电时调用一次 Menu_Init()
@@ -40,22 +36,14 @@
 
 /* ---------------- 用户可配置参数 ---------------- */
 
-/* 显示刷新周期(ms): 参数界面要实时看数据, 太快会占用太多 I2C 时间 */
+/* 显示刷新周期(ms): 太快会占用过多 OLED I2C 时间 */
 #define MENU_REFRESH_MS     100
 
 /* ------------------------------------------------ */
 
-/* 菜单页面编号 */
-typedef enum
-{
-    MENU_PAGE_MAIN = 0,     /* 第一页: 选择界面 */
-    MENU_PAGE_PARAM,        /* 参数界面: 航向角 / 俯仰角 */
-    MENU_PAGE_DEBUG         /* 定时运动与底盘位置计数 */
-} MenuPage_t;
-
 /* 第一页里可选的菜单项 */
-#define MENU_ITEM_PARAM     0   /* 参数界面 */
-#define MENU_ITEM_DEBUG     1   /* 底盘调试 */
+#define MENU_ITEM_AUTO      0   /* 自动跑图 */
+#define MENU_ITEM_SINGLE    1   /* 单段调试 */
 #define MENU_ITEM_NUM       2   /* 菜单项总数 */
 
 /* 【初始化】上电调用一次, 把页面复位到第一页 */
@@ -67,8 +55,5 @@ void Menu_Init(void);
  *   2. 把当前页面画到 OLED(按 MENU_REFRESH_MS 限频)
  * 前提: 主循环里已经调用了 Key_Scan()。 */
 void Menu_Run(void);
-
-/* 【查询当前页面】需要根据界面做不同动作时可以用它判断 */
-MenuPage_t Menu_GetPage(void);
 
 #endif /* __MENU_H */

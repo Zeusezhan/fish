@@ -1,0 +1,42 @@
+# ==================== Keil MDK 构建产物 ====================
+# 整个输出目录都忽略, 只保留两个对外有用的产物: 可烧录的 hex 和链接脚本
+MDK-ARM/fish/*
+!MDK-ARM/fish/fish.hex
+!MDK-ARM/fish/fish.sct
+
+# 通用构建产物后缀(兜底, 防止别的目录漏网)
+*.o
+*.d
+*.crf
+*.dep
+*.axf
+*.lnp
+*.map
+*.htm
+*.build_log.htm
+*.bak
+*_sct.Bak
+*.iex
+*.tra
+
+# ==================== Keil 用户本地配置 ====================
+# uvguix 是窗口布局, 每台机器不同, 提交上去只会互相覆盖
+*.uvguix
+*.uvguix.*
+
+# ==================== 编辑器 / 操作系统 ====================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ==================== 临时文件 ====================
+~$*.docx
+~$*.xlsx
+*.tmp
+*.log
+!MDK-ARM/motor_map_build.log
