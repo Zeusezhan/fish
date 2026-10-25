@@ -800,6 +800,21 @@
           </Files>
         </Group>
         <Group>
+          <GroupName>Function</GroupName>
+          <Files>
+            <File>
+              <FileName>InertialRun.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Function\InertialRun.c</FilePath>
+            </File>
+            <File>
+              <FileName>InertialRun.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Function\InertialRun.h</FilePath>
+            </File>
+          </Files>
+        </Group>
+        <Group>
           <GroupName>::CMSIS</GroupName>
         </Group>
       </Groups>

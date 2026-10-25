@@ -2,14 +2,21 @@
  * JY901S 九轴姿态传感器驱动 (I2C)
  *
  * 【数据流】
- *   JY901S_Poll() / JY901S_ReadOnce()
- *     -> jy_i2c_read_regs(0x34, buf, 24)   一次读 12 个寄存器
- *     -> 小端解析成 12 个 int16 (AX..Yaw)
- *     -> jy_parse_regs()  换算物理量 + Yaw 解缠绕
+ *   JY901S_ReadIsr()            <-- 只在 TIM3 中断里调用
+ *     -> jy_i2c_read_regs(0x39, buf, 14)   一次读 7 个寄存器
+ *     -> jy_parse_fast()   小端解析 + 合理性校验
+ *     -> 通过校验才写 jy901s_data
  *
- * 【重要说明】
- *   JY901S 的 I2C 读有两种时序, 不同批次的模块固件支持的时序不一样,
- *   所以 jy_i2c_read_regs() 里两条都试, 任一条成功即可, 提高兼容性。
+ * 【为什么只读 0x39~0x3F】
+ *   姿态闭环只需要 Yaw(0x3F) 和 GZ(0x39)。这两个寄存器之间隔着
+ *   磁场和 Roll/Pitch, 所以最小连续区间就是 0x39~0x3F 共 14 字节。
+ *   100kHz 下约 1.5ms —— 这个时间直接等于"定时器中断被占用多久",
+ *   所以不要再把区间扩大到 0x34(加速度)那一端。
+ *
+ * 【坏帧处理】
+ *   通信失败 / 全 0 / 全 FF / 角速度越界 / 航向单拍跳变超限,
+ *   只要命中一条就丢弃本拍, jy901s_data 保持上一拍的值。
+ *   调用方(中断)拿到 0 之后沿用上一拍输出继续闭环, 绝不停摆。
  * ============================================================ */
 
 #include "main.h"
@@ -35,7 +42,12 @@ static uint32_t jy_next_poll_tick = 0;   /* 下一次允许读取的时刻 */
 static uint8_t  jy_first_poll = 1;       /* 1 = 第一次调用立刻读, 不等间隔 */
 static uint8_t  jy_fail_cnt = 0;         /* 连续读取失败次数 */
 static uint32_t jy_update_tick = 0;      /* 最近一次成功解析数据的时刻 */
-static uint8_t  jy_diag_latch = 0;       /* 本次读取中发生过容差比对失败 */
+static uint8_t  jy_diag_latch = 0;       /* 本次读取中是否出现过坏帧 */
+
+/* ---- 诊断计数(供 OLED / 调参界面显示) ---- */
+static uint32_t jy_ok_total   = 0;       /* 成功帧数 */
+static uint32_t jy_fail_total = 0;       /* I2C 通信失败次数 */
+static uint32_t jy_bad_total  = 0;       /* 通信成功但被判为坏帧的次数 */
 
 /* ==================== I2C 底层 ==================== */
 
@@ -44,13 +56,16 @@ static uint8_t  jy_diag_latch = 0;       /* 本次读取中发生过容差比对
   * @note   如果上一次传输异常中断, I2C 外设会停在 BUSY 状态,
   *         之后所有读写都会立即失败且无法自行恢复。
   *         这里检测到非 READY 就复位一次外设, 让后续读写能继续。
+  *
+  *         ★ 这里绝对不能有 HAL_Delay —— 本函数会被定时器中断调用,
+  *           而 TIM3(优先级 5) 会抢占 SysTick(优先级 15), 中断里
+  *           等 tick 就是等一个永远不会到来的事件, 直接死机。
   */
 static void jy_i2c_check_recover(void)
 {
     if (HAL_I2C_GetState(JY901S_I2C_HANDLE) != HAL_I2C_STATE_READY)
     {
         HAL_I2C_DeInit(JY901S_I2C_HANDLE);
-        HAL_Delay(2);
         HAL_I2C_Init(JY901S_I2C_HANDLE);
     }
 }
@@ -61,33 +76,21 @@ static void jy_i2c_check_recover(void)
   * @param  buf  接收缓冲区
   * @param  len  要读取的字节数
   * @retval 0 = 成功, 1 = 失败
-  * @note   依次尝试两种 I2C 时序, 兼容不同批次的模块固件:
-  *           路径A: 寄存器地址 + 重复起始 + 读(STM32 的 Mem_Read 标准时序)
-  *           路径B: 先写寄存器地址并 STOP, 再单独发起一次读
+  * @note   只用 STM32 标准的 Mem_Read 时序(寄存器地址 + 重复起始 + 读)。
+  *
+  *         原来还有一条"先写寄存器地址并 STOP、再单独读"的备用时序,
+  *         但它中间有 HAL_Delay(2) —— 一旦被搬进定时器中断就是死锁。
+  *         而且那条时序本身就违反了 JY901S 的寄存器时序要求, 只会
+  *         制造更多失败。已删除。
   */
 static uint8_t jy_i2c_read_regs(uint8_t reg, uint8_t *buf, uint16_t len)
 {
-    uint8_t reg_tmp = reg;
-
     jy_i2c_check_recover();
 
-    /* ---- 路径A: 寄存器地址 + 重复起始 + 读 ---- */
     if (HAL_I2C_Mem_Read(JY901S_I2C_HANDLE, (uint16_t)(JY901S_I2C_ADDR << 1), reg,
                          I2C_MEMADD_SIZE_8BIT, buf, len, JY901S_I2C_TIMEOUT) == HAL_OK)
     {
         return 0;
-    }
-
-    /* ---- 路径B: 写寄存器地址(带STOP) + 单独读 ---- */
-    if (HAL_I2C_Master_Transmit(JY901S_I2C_HANDLE, (uint16_t)(JY901S_I2C_ADDR << 1),
-                                &reg_tmp, 1, JY901S_I2C_TIMEOUT) == HAL_OK)
-    {
-        HAL_Delay(2);
-        if (HAL_I2C_Master_Receive(JY901S_I2C_HANDLE, (uint16_t)(JY901S_I2C_ADDR << 1),
-                                   buf, len, JY901S_I2C_TIMEOUT) == HAL_OK)
-        {
-            return 0;
-        }
     }
 
     return 1;
@@ -173,61 +176,111 @@ static float jy_scale(int16_t raw, float range)
 }
 
 /**
-  * @brief  把 12 个原始寄存器换算成物理量并更新 jy901s_data
-  * @param  reg  12 个原始寄存器值
-  * @note   下标约定: 0=AX 1=AY 2=AZ  3=GX 4=GY 5=GZ
-  *                   6=HX 7=HY 8=HZ  9=Roll 10=Pitch 11=Yaw
-  *
-  *         Yaw 解缠绕原理: 模块输出的 Yaw 会在 +180/-180 之间跳变,
-  *         直接使用的话, 小车转过 180° 时角度会从 179 突然变成 -179,
-  *         PID 会误以为要反转。这里通过检测相邻两帧的差值(超过 180°
-  *         说明发生了一次跳变), 累加圈数 jy_wrap_cnt 把角度"拉直",
-  *         得到可以无限累计的连续角度。
+  * @brief  把 14 字节原始缓冲区(寄存器 0x39~0x3F)校验并解析成物理量
+  * @param  buf  14 字节接收缓冲区(小端, 低字节在前)
+  * @retval 1 = 这一帧有效, 已更新 jy901s_data; 0 = 坏帧, 整个丢弃
+  * @note   校验顺序按"代价从低到高"排列, 只要发现不对就立刻返回,
+  *         不让坏数据进入 PID。
   */
-static void jy_parse_regs(const int16_t *reg)
+static uint8_t jy_parse_fast(const uint8_t *buf)
 {
-    float raw_yaw;
-    float diff;
+    int16_t raw_gz;
+    int16_t raw_roll;
+    int16_t raw_pitch;
+    int16_t raw_yaw;
+    float   gz;
+    float   yaw;
+    float   diff;
+    int32_t wrap_cnt;
+    float   unwrapped;
+    uint8_t i;
+    uint8_t all_zero = 1u;
+    uint8_t all_ff   = 1u;
 
-    /* 加速度, 满量程 ±16g */
-    jy901s_data.ax = jy_scale(reg[0], 16.0f);
-    jy901s_data.ay = jy_scale(reg[1], 16.0f);
-    jy901s_data.az = jy_scale(reg[2], 16.0f);
+    /* ---- 0. 整帧全 0x00 / 全 0xFF: 总线悬空或模块没应答 ---- */
+    for (i = 0; i < JY901S_REG_FAST_BYTES; i++)
+    {
+        if (buf[i] != 0x00u)
+        {
+            all_zero = 0u;
+        }
+        if (buf[i] != 0xFFu)
+        {
+            all_ff = 0u;
+        }
+    }
+    if ((all_zero != 0u) || (all_ff != 0u))
+    {
+        return 0u;
+    }
 
-    /* 角速度, 满量程 ±2000deg/s; gz 乘方向符号, 与 yaw 保持同号(左转为正) */
-    jy901s_data.gx = jy_scale(reg[3], 2000.0f);
-    jy901s_data.gy = jy_scale(reg[4], 2000.0f);
-    jy901s_data.gz = jy_scale(reg[5], 2000.0f) * JY901S_YAW_SIGN;
+    /* ---- 1. 取出各个寄存器(小端) ---- */
+    raw_gz    = (int16_t)(((uint16_t)buf[1]  << 8) | buf[0]);    /* 0x39 GZ    */
+    raw_roll  = (int16_t)(((uint16_t)buf[9]  << 8) | buf[8]);    /* 0x3D Roll  */
+    raw_pitch = (int16_t)(((uint16_t)buf[11] << 8) | buf[10]);   /* 0x3E Pitch */
+    raw_yaw   = (int16_t)(((uint16_t)buf[13] << 8) | buf[12]);   /* 0x3F Yaw   */
 
-    /* 角度, 满量程 ±180 */
-    jy901s_data.roll  = jy_scale(reg[9], 180.0f);
-    jy901s_data.pitch = jy_scale(reg[10], 180.0f);
+    gz  = jy_scale(raw_gz, 2000.0f);    /* 角速度满量程 ±2000deg/s */
+    yaw = jy_scale(raw_yaw, 180.0f);    /* 角度满量程 ±180deg */
 
-    /* ---- Yaw 解缠绕 ---- */
-    raw_yaw = jy_scale(reg[11], 180.0f);
+    /* ---- 2. 角速度范围 ---- */
+    if ((gz > JY901S_MAX_GZ_ABS) || (gz < -JY901S_MAX_GZ_ABS))
+    {
+        return 0u;
+    }
+
+    /* ---- 3. 航向解缠绕 + 单拍跳变校验 ----
+     * 模块的 Yaw 在 +180/-180 之间跳变, 先按跳变方向累加圈数把它"拉直",
+     * 再看这一拍相对上一拍走了多少度。
+     * 超过门限说明读到了"半个旧帧 + 半个新帧", 宁可丢这一拍也不能让
+     * 一个假角度直接进 PID —— 那正是原来"偶发猛打方向"的来源。 */
+    wrap_cnt = jy_wrap_cnt;
 
     if (!jy_has_yaw)
     {
-        /* 第一帧: 只记录基准, 不判跳变 */
-        jy_has_yaw = 1;
-        jy_last_raw_yaw = raw_yaw;
+        /* 第一帧: 只建立基准, 不做跳变判断 */
+        unwrapped = yaw + (float)wrap_cnt * 360.0f;
+    }
+    else
+    {
+        diff = yaw - jy_last_raw_yaw;
+        if (diff > 180.0f)
+        {
+            wrap_cnt--;         /* 正向越过 +180, 跳到 -180 */
+        }
+        else if (diff < -180.0f)
+        {
+            wrap_cnt++;         /* 反向越过 -180, 跳到 +180 */
+        }
+
+        unwrapped = yaw + (float)wrap_cnt * 360.0f;
+        diff = unwrapped - jy_yaw_unwrapped_raw;
+        if ((diff > JY901S_MAX_YAW_STEP) || (diff < -JY901S_MAX_YAW_STEP))
+        {
+            return 0u;
+        }
     }
 
-    diff = raw_yaw - jy_last_raw_yaw;
-    if (diff > 180.0f)
-    {
-        jy_wrap_cnt--;      /* 正向越过 +180 跳变到 -180 */
-    }
-    else if (diff < -180.0f)
-    {
-        jy_wrap_cnt++;      /* 反向越过 -180 跳变到 +180 */
-    }
-    jy_last_raw_yaw = raw_yaw;
-    jy_yaw_unwrapped_raw = raw_yaw + (float)jy_wrap_cnt * 360.0f;
+    /* ---- 4. 全部校验通过, 提交 ---- */
+    jy_has_yaw           = 1u;
+    jy_last_raw_yaw      = yaw;
+    jy_wrap_cnt          = wrap_cnt;
+    jy_yaw_unwrapped_raw = unwrapped;
+
+    jy901s_data.gz    = gz * JY901S_YAW_SIGN;
+    jy901s_data.gx    = 0.0f;   /* 精简读取区间不含 GX/GY, 闭环用不到 */
+    jy901s_data.gy    = 0.0f;
+    jy901s_data.ax    = 0.0f;   /* 同上, 加速度也不再读取 */
+    jy901s_data.ay    = 0.0f;
+    jy901s_data.az    = 0.0f;
+    jy901s_data.roll  = jy_scale(raw_roll, 180.0f);
+    jy901s_data.pitch = jy_scale(raw_pitch, 180.0f);
 
     jy_update_yaw_outputs();
-    jy901s_data.ready = 1;
+    jy901s_data.ready = 1u;
     jy_update_tick = HAL_GetTick();
+
+    return 1u;
 }
 
 /* ==================== 对外接口 ==================== */
@@ -254,13 +307,18 @@ void JY901S_Init(void)
     jy_next_poll_tick = HAL_GetTick();
     jy_first_poll = 1;
     jy_fail_cnt = 0;
+    jy_diag_latch = 0u;
+
+    jy_ok_total   = 0u;
+    jy_fail_total = 0u;
+    jy_bad_total  = 0u;
 }
 
 /**
   * @brief  进入"正在写 jy901s_data"状态, 期间屏蔽 TIM3 中断
-  * @note   TIM3 的航向 PD 中断优先级(5)高于 SysTick(15),
-  *         可以在主循环的 I2C 传输中途抢占; 不屏蔽的话,
-  *         中断可能读到"改了一半"的 yaw, 表现为航向角偶发跳变。
+  * @note   ★ 只在闭环未运行的上电阶段使用(零点、写模块配置)。
+  *         闭环运行期间 JY901S 的读取已经在 TIM3 中断内部完成,
+  *         主循环不再碰 I2C, 也就不需要这对函数了。
   */
 void JY901S_BeginUpdate(void)
 {
@@ -301,15 +359,16 @@ uint32_t JY901S_GetUpdateTick(void)
 }
 
 /**
-  * @brief  取出并清除"上次读取是否发生过容差比对失败"的标志
-  * @retval 1 = 发生过(说明这帧跨了模块刷新点, 或总线有误码), 0 = 没有
-  * @note   用途是区分两类失败:
-  *           调用 JY901S_ReadOnce() 返回 1, 但本标志为 0
-  *             -> HAL 层的 I2C 传输本身就失败了(无应答/超时)
-  *           调用返回 1, 且本标志为 1
-  *             -> 传输成功, 但两次读到的数据差太多
+  * @brief  取出并清除"上次读取是否被判为坏帧"的标志
+  * @retval 1 = 发生过(通信成功但数据不可信), 0 = 没有
+  * @note   用来区分两类失败:
+  *           JY901S_ReadIsr() 返回 0 且本标志为 0
+  *             -> I2C 传输本身就失败了(HAL 层无应答/超时)
+  *           返回 0 且本标志为 1
+  *             -> 传输成功, 但整帧全 0/全 FF、或角速度越界、
+  *                或航向单拍跳变超过门限
   *         后者比例很高时, 通常是外部上拉不足导致误码,
-  *         或者是模块回传率太低(10Hz), 20ms 一读总是跨刷新点。
+  *         或者模块回传率太低(10Hz), 20ms 一读总是跨刷新点。
   */
 uint8_t JY901S_TakeDiagLatch(void)
 {
@@ -320,9 +379,11 @@ uint8_t JY901S_TakeDiagLatch(void)
 }
 
 /**
-  * @brief  当前生效的 I2C 总线速率(Hz)
-  * @note   传输失败时驱动会自动降速重试, 该值会随之变小,
-  *         所以"速率掉到 100k 以下"本身就是信号质量差的证据。
+  * @brief  当前配置的 I2C 总线速率(Hz)
+  * @note   ★ 这个值来自 hi2c1.Init.ClockSpeed, 是配置值, 不是实测值。
+  *         HAL 不会因为传输失败自动降速(原来注释里那句说法是错的),
+  *         所以它永远返回 100000。判断信号质量请看
+  *         JY901S_GetFailCount() / JY901S_GetBadCount() 的比例。
   */
 uint32_t JY901S_GetBusSpeed(void)
 {
@@ -330,100 +391,80 @@ uint32_t JY901S_GetBusSpeed(void)
 }
 
 /**
-  * @brief  立即读取一次姿态数据并解析
+  * @brief  读一次姿态数据(只在定时器中断里调用)
+  * @retval 1 = 这一拍数据有效, 0 = 无效(调用方应沿用上一拍)
+  * @note   这是全工程唯一访问 JY901S 的地方。
+  *
+  *         ★ 为什么放在定时器中断里
+  *           原来在主循环里轮询, 一次读 2~5ms, 期间可能被中断打断;
+  *           而且主循环还要刷 OLED(一次 30ms 以上), 读数节奏完全不可控。
+  *           搬进 20ms 的 TIM3 中断之后:
+  *             - 采样时刻严格固定, PID 的 dt 是常数
+  *             - 只有这一个上下文碰 I2C, 不需要任何锁
+  *             - "读完立刻算 PID", 数据新鲜度最高
+  *
+  *         ★ 中断里能花多久
+  *           读 14 字节 @100kHz 约 1.5ms, 加上最坏 3ms 的 HAL 超时,
+  *           单次最坏约 4.5ms。20ms 周期下占用不到 25%, 且期间
+  *           USART1 中断(优先级 0)仍可抢占, 电机指令不会丢。
+  */
+uint8_t JY901S_ReadIsr(void)
+{
+    uint8_t buf[JY901S_REG_FAST_BYTES];
+
+    if (jy_i2c_read_regs(JY901S_REG_FAST_START, buf, JY901S_REG_FAST_BYTES) != 0)
+    {
+        jy_fail_total++;
+        return 0u;
+    }
+
+    if (jy_parse_fast(buf) == 0u)
+    {
+        jy_bad_total++;
+        jy_diag_latch = 1u;
+        return 0u;
+    }
+
+    jy_ok_total++;
+    return 1u;
+}
+
+/**
+  * @brief  立即读取一次并解析(兼容旧接口)
   * @retval 0 = 成功, 1 = I2C 通信失败或整帧数据无效
-  * @note   一次读取 0x34~0x3F 共 12 个寄存器(24 字节):
-  *         加速度 AX~AZ + 角速度 GX~GZ + 磁场 HX~HZ + 角度 Roll/Pitch/Yaw
-  *
-  *         ★ 为什么要"读两次比对":
-  *           模块按自己的节拍刷新寄存器(出厂 10Hz), 如果读取的 24 字节
-  *           正好跨在它刷新的瞬间, 就会拿到"一半旧一半新"的帧 ——
-  *           这种帧的 Yaw 会突然跳几十度, 直接喂给 PID 会导致猛打方向。
-  *
-  *         ★ 为什么用"容差"而不是"完全相同":
-  *           内部弱上拉(约 40kΩ)驱动 100kHz 时边沿很慢, 偶发单字节
-  *           误码是正常的。只要两次读到的是同一个采样点, 数值只会因为
-  *           噪声差几个 LSB; 而跨刷新点造成的差异是成百上千 LSB。
-  *           用 JY901S_BURST_TOLERANCE 分界, 既不会误杀好帧,
-  *           也能可靠拦住"半新半旧"的帧。
+  * @note   内部就是 JY901S_ReadIsr(), 只是返回值约定反转。
+  *         只在上电自检和模块配置阶段使用; 闭环运行期间由
+  *         TIM3 中断直接调用 JY901S_ReadIsr()。
   */
 uint8_t JY901S_ReadOnce(void)
 {
-    uint8_t buf[JY901S_REG_BYTES];
-    uint8_t chk[JY901S_REG_BYTES];
-    int16_t reg[JY901S_REG_NUM];
-    uint8_t i;
-    uint8_t all_zero = 1u;
-    uint8_t all_ff   = 1u;
+    return (JY901S_ReadIsr() != 0u) ? 0u : 1u;
+}
 
-    /* 读总线期间不用动中断: 数据还没开始解析 */
-    jy_diag_latch = 0u;
+/**
+  * @brief  中断内读取的统计
+  */
+uint32_t JY901S_GetOkCount(void)
+{
+    return jy_ok_total;
+}
 
-    if (jy_i2c_read_regs(JY901S_REG_AX, buf, JY901S_REG_BYTES) != 0)
-    {
-        return 1;
-    }
+uint32_t JY901S_GetFailCount(void)
+{
+    return jy_fail_total;
+}
 
-    /* 整帧全 0x00 或全 0xFF 是典型的无效数据(总线悬空/模块没应答),
-     * 直接丢弃, 避免把 yaw 误解析成 0 而看起来"自己回到 0 度"。 */
-    for (i = 0; i < JY901S_REG_BYTES; i++)
-    {
-        if (buf[i] != 0x00u)
-        {
-            all_zero = 0u;
-        }
-        if (buf[i] != 0xFFu)
-        {
-            all_ff = 0u;
-        }
-    }
+uint32_t JY901S_GetBadCount(void)
+{
+    return jy_bad_total;
+}
 
-    if ((all_zero != 0u) || (all_ff != 0u))
-    {
-        return 1;
-    }
-
-    /* ---- 相邻两次读取的容差比对 ----
-     * 同一个采样点的两次读取, 差值应该只有几个 LSB;
-     * 差值超过 JY901S_BURST_TOLERANCE 说明跨过了模块刷新点, 丢弃本次。
-     * 比对失败也计入总线诊断, 便于判断是"刷新跨帧"还是"信号质量差"。 */
-    if (jy_i2c_read_regs(JY901S_REG_AX, chk, JY901S_REG_BYTES) != 0)
-    {
-        jy_diag_latch = 1u;
-        return 1;
-    }
-
-    for (i = 0; i < JY901S_REG_NUM; i++)
-    {
-        /* 按寄存器(小端 16 位)比较, 不是按字节, 避免把高位进位误判成噪声 */
-        int16_t a = (int16_t)(((uint16_t)buf[i * 2 + 1] << 8) | buf[i * 2]);
-        int16_t b = (int16_t)(((uint16_t)chk[i * 2 + 1] << 8) | chk[i * 2]);
-        int32_t d = (int32_t)a - (int32_t)b;
-
-        if (d < 0)
-        {
-            d = -d;
-        }
-
-        if (d > JY901S_BURST_TOLERANCE)
-        {
-            jy_diag_latch = 1u;
-            return 1;
-        }
-    }
-
-    for (i = 0; i < JY901S_REG_NUM; i++)
-    {
-        /* 维特智能 I2C 数据是小端: 低字节在前 */
-        reg[i] = (int16_t)(((uint16_t)buf[i * 2 + 1] << 8) | buf[i * 2]);
-    }
-
-    /* 解析 + 写 jy901s_data 必须整段完成, 期间不让 TIM3 抢占 */
-    JY901S_BeginUpdate();
-    jy_parse_regs(reg);
-    JY901S_EndUpdate();
-
-    return 0;
+void JY901S_ResetStats(void)
+{
+    jy_ok_total   = 0u;
+    jy_fail_total = 0u;
+    jy_bad_total  = 0u;
+    jy_fail_cnt   = 0u;
 }
 
 /**

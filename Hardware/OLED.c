@@ -199,19 +199,26 @@ static void OLED_WriteCmd(uint8_t cmd)
     OLED_I2C_Stop();
 }
 
-/* 向SSD1306写一个显示数据(控制字节0x40) */
-static void OLED_WriteData(uint8_t data)
-{
-    OLED_I2C_Start();
-    OLED_I2C_SendByte(OLED_ADDR);   /* 器件地址(写) */
-    OLED_I2C_SendByte(0x40);        /* 控制字节: 后面是显存数据 */
-    OLED_I2C_SendByte(data);
-    OLED_I2C_Stop();
-}
+/* 向SSD1306写一个显示数据(控制字节0x40)
+ * ★ 现在整页数据走 OLED_Refresh() 里的连续写, 这里保留单字节接口
+ *   只是为了调试时能单独写一个字节, 平时不用。 */
 
 /* ---------------- 显存操作 ---------------- */
 
-/* 把显存整屏刷新到OLED(共8页, 每页128字节) */
+/* 把显存整屏刷新到OLED(共8页, 每页128字节)
+ *
+ * ★ 为什么一页只发一次 Start/Stop
+ *   原来每个字节都单独走一遍 Start + 3 字节 + Stop, 整屏 1024 字节
+ *   就是 1024 次完整事务, 每次事务的起停时序和地址字节都白费,
+ *   一次刷新要 30ms 以上。
+ *
+ *   SSD1306 支持"连续写": 发完控制字节 0x40 之后, 它会自己把后续
+ *   收到的字节依次塞进显存并自动递增列地址。所以一页可以只发
+ *   一次 Start, 然后连着送 128 个数据字节, 最后 Stop。
+ *
+ *   整屏事务数从 1024 次降到 8 次, 刷新时间降到十几毫秒的量级 ——
+ *   这对跑图很关键: 刷屏期间主循环是停摆的, 20ms 的底盘下发节拍
+ *   会被它拉长, 航向修正就跟不上了。 */
 void OLED_Refresh(void)
 {
     uint8_t page;
@@ -223,10 +230,16 @@ void OLED_Refresh(void)
         OLED_WriteCmd(0x00);            /* 列地址低4位 = 0 */
         OLED_WriteCmd(0x10);            /* 列地址高4位 = 0 */
 
+        OLED_I2C_Start();
+        OLED_I2C_SendByte(OLED_ADDR);   /* 器件地址(写) */
+        OLED_I2C_SendByte(0x40);        /* 控制字节: 后面全是显存数据 */
+
         for (i = 0; i < 128; i++)
         {
-            OLED_WriteData(OLED_Buffer[page * 128 + i]);
+            OLED_I2C_SendByte(OLED_Buffer[page * 128 + i]);
         }
+
+        OLED_I2C_Stop();
     }
 }
 
