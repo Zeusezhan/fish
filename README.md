@@ -241,7 +241,7 @@ Key_Init() / InertialRun_Init() / Menu_Init()
 Wireless_Init()
 FPU->FPCCR |= ASPEN | LSPEN
 HAL_TIM_Base_Start_IT(&htim3)                      ← 闭环总开关
-YawLoop_Disable()                                  ← 上电默认不闭环
+YawLoop_Enable(当前航向, 默认限幅)                  ← 上电即启用航向闭环
        ↓
     while(1) { ... }
 ```
@@ -250,6 +250,8 @@ YawLoop_Disable()                                  ← 上电默认不闭环
 
 1. `HAL_TIM_Base_Start_IT(&htim3)` **必须**在所有 I2C 初始化之后 —— 一旦启动，IMU 就只归中断读。
 2. `JY901S_SetOutputRate()` / `JY901S_ZeroYaw()` **必须**在启动之前 —— 它们内部是阻塞 I2C 写。
+
+上电启用闭环只代表 TIM3 开始计算航向修正，**不会因此自动驱动电机**；电机运动仍由跑图状态机发出动作命令控制。每段起跑时状态机将目标航向更新为该段起步时的当前航向，停车时关闭闭环，下一段再重新启用。
 
 ### 5.2 控制层：中断里做什么
 
@@ -530,7 +532,7 @@ STM32_Programmer_CLI.exe -c port=SWD -w MDK-ARM\fish\fish.hex -v -rst
 
 ## 9. 上电与操作
 
-上电后直接进入**选择页**，不会自动跑车。
+上电后航向闭环已启用，但电机保持不动；设备进入**选择页**，不会自动跑车。选择并启动 Auto Run 后，状态机才开始执行预设路径。
 
 ```
 === FISH RUNNER ===        ← 选择页
