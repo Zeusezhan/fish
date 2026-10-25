@@ -16,15 +16,13 @@
  *       "kp,kd\n"     例如 "6.0,0.4\n"    (数据发送框手打, 两个一起设)
  *       "kp,ki,kd\n"  例如 "6.0,0.3,0.4\n" (三个一起设)
  *       "P6.0\n"      只改 Kp            (VOFA+ 滑动条发 "P%f\n")
- *       "I0.3\n"      只改 Ki
+ *       "I0.3\n"      只改 Ki            (VOFA+ 滑动条发 "I%f\n")
  *       "D0.4\n"      只改 Kd            (VOFA+ 滑动条发 "D%f\n")
  * ============================================================ */
 
 #include "wireless_uart.h"
 
-/* ---- 闭环参数(定义在 main.c, 见那里的 USER CODE BEGIN PD) ----
- * 上报只需要用到目标航向, 在线调参需要写 g_yaw_kp / g_yaw_ki / g_yaw_kd,
- * 这里一起 extern 进来。 */
+/* ---- 闭环参数(定义在 main.c) ---- */
 extern volatile float g_yaw_target;
 extern volatile float g_yaw_kp;
 extern volatile float g_yaw_ki;
@@ -266,8 +264,9 @@ static float wireless_clamp(float v, float hi)
   * @brief  解析一条下行命令, 解析成功就写进全局 PI-D 参数
   * @note   支持这几种写法:
   *             "kp,kd"   例如 "6.0,0.4"  两个一起设(数据发送框手打)
+  *             "kp,ki,kd" 例如 "6.0,0.3,0.4" 三个一起设
   *             "P<值>"   例如 "P6.0"     只改 Kp(VOFA+ 滑动条发 "P%f\n")
-  *             "I<值>"   例如 "I0.3"     只改 Ki
+  *             "I<值>"   例如 "I0.3"     只改 Ki(VOFA+ 滑动条发 "I%f\n")
   *             "D<值>"   例如 "D0.4"     只改 Kd(VOFA+ 滑动条发 "D%f\n")
   */
 static void wireless_parse_frame(char *buf, uint8_t len)
@@ -346,26 +345,23 @@ static void wireless_parse_frame(char *buf, uint8_t len)
         return;
     }
 
-    /* 若后面还跟了第三个数字, 就按 "kp,ki,kd" 处理 */
+    /* 三个值按 kp,ki,kd 解析, 两个值保持 kp,kd 兼容格式。 */
     ki = g_yaw_ki;
     if ((idx < len) && ((buf[idx] == ',') || (buf[idx] == ' ')))
     {
         uint8_t idx3 = idx;
-        float   third;
+        float third;
 
-        while ((idx3 < len) && ((buf[idx3] == ',') || (buf[idx3] == ' ') || (buf[idx3] == '\t')))
+        while ((idx3 < len) && ((buf[idx3] == ',') || (buf[idx3] == ' ')
+                                || (buf[idx3] == '\t')))
         {
             idx3++;
         }
 
         if (wireless_parse_float(buf, len, &idx3, &third))
         {
-            /* 三个数: kp, ki, kd —— 第一个数当 kp, 第二个当 ki,
-             * 刚刚解析出来的 kd 其实是 ki, 第三个才是 kd */
-            g_yaw_kp = wireless_clamp(kp, 100.0f);
-            g_yaw_ki = wireless_clamp(kd, 10.0f);
-            g_yaw_kd = wireless_clamp(third, 10.0f);
-            return;
+            ki = kd;
+            kd = third;
         }
     }
 

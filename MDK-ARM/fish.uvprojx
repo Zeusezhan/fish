@@ -703,26 +703,6 @@
           <GroupName>Hardware</GroupName>
           <Files>
             <File>
-              <FileName>Emm_V5.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\Hardware\Emm_V5.c</FilePath>
-            </File>
-            <File>
-              <FileName>Emm_V5.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>..\Hardware\Emm_V5.h</FilePath>
-            </File>
-            <File>
-              <FileName>Crane.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\Hardware\Crane.c</FilePath>
-            </File>
-            <File>
-              <FileName>Crane.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>..\Hardware\Crane.h</FilePath>
-            </File>
-            <File>
               <FileName>function.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\Hardware\function.c</FilePath>
@@ -731,16 +711,6 @@
               <FileName>function.h</FileName>
               <FileType>5</FileType>
               <FilePath>..\Hardware\function.h</FilePath>
-            </File>
-            <File>
-              <FileName>inertial.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\Hardware\inertial.c</FilePath>
-            </File>
-            <File>
-              <FileName>inertial.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>..\Hardware\inertial.h</FilePath>
             </File>
             <File>
               <FileName>jy901s.c</FileName>
@@ -781,11 +751,6 @@
               <FileName>OLED.h</FileName>
               <FileType>5</FileType>
               <FilePath>..\Hardware\OLED.h</FilePath>
-            </File>
-            <File>
-              <FileName>REG.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>..\Hardware\REG.h</FilePath>
             </File>
             <File>
               <FileName>wireless_uart.c</FileName>

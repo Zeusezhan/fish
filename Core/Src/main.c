@@ -30,28 +30,50 @@
 #include "OLED.h"
 #include "key.h"
 #include "Menu.h"
-#include "wireless_uart.h"
 #include "function.h"
-#include <stdio.h>
+#include "InertialRun.h"
+#include "wireless_uart.h"
 /* USER CODE END Includes */
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 
-/* ==================== 航向角 PD 闭环参数 ==================== */
+/* ==================== 航向环(PI-D)参数 ====================
+ *
+ *   err = 目标航向 - 当前航向
+ *   u   = Kp*err + Ki*∫err*dt - Kd*gz        (gz = 陀螺仪 Z 轴角速度)
+ *
+ * 微分项直接用陀螺仪角速度做阻尼, 不自己差分航向角, 所以不会放大噪声。
+ * 积分项用来消掉麦轮四轮摩擦/辊子接触不对称造成的**稳态偏航** ——
+ * 纯 PD 只能靠"留一点航向误差"来对抗它, 表现就是横移时车头慢慢歪
+ * 过去而且回不来。
+ *
+ * 【整定顺序】
+ *   1. 先只调 Kp: 从小往大加, 加到"修得够快但开始有点晃";
+ *   2. 再加 Kd 把晃动压下去;
+ *   3. 最后加一点点 Ki 消掉残余的稳态偏航。
+ */
+#define YAW_KP_DEFAULT          (4.0f)      /* 比例: 误差 1 度给多少 RPM */
+#define YAW_KI_DEFAULT          (0.30f)     /* 积分: 单位 RPM/(度*秒) */
+#define YAW_KD_DEFAULT          (0.35f)     /* 微分: 阻尼, 作用于 gz */
 
-/* PD 参数(上电默认值, 运行中可改):
- * 整定时先只调 Kp —— 从小往大加, 加到"修得够快但开始有点晃";
- * 然后再加 Kd 把晃动压下去。Kd 用的是陀螺仪角速度, 不需要自己差分。 */
-#define YAW_PID_KP_DEFAULT      (4.0f)      /* 比例: 航向误差 1 度给多少转速 */
-#define YAW_PID_KD_DEFAULT      (0.35f)     /* 微分: 阻尼项, 压住过冲 */
+/* 控制周期(秒), 必须与 TIM3 的 20ms 一致 */
+#define YAW_DT_S                (0.02f)
 
-/* 航向死区: 误差绝对值小于该角度时输出为零(单位: 度)。
- * 作用是抑制小误差造成的抖动 —— 误差在 ±0.3° 内认为"已经正了",
- * 不再输出修正, 避免电机在目标点附近来回微调。
- * ★ 不要设得太小: 陀螺噪声就有 ±0.2~0.5°, 死区比噪声还小的话
- *   等于没有死区, 电机会跟着噪声抖。 */
-#define YAW_PID_TOLERANCE       (0.3f)
+/* 死区(度): 误差小于它时不再积分, 只留比例+阻尼。
+ * ★ 别设大 —— 2 度死区在横移时足以让车头越走越歪。 */
+#define YAW_DEADBAND_DEG        (0.20f)
+
+/* 积分项输出限幅(RPM) 和 清积分门限(度) */
+#define YAW_INT_MAX_RPM         (8.0f)
+#define YAW_INT_RESET_DEG       (8.0f)
+
+/* 输出限幅(RPM)。InertialRun 会通过 YawLoop_Enable 覆盖它。 */
+#define YAW_OUT_MAX_DEFAULT     (30.0f)
+
+/* IMU 掉线判据(ms): 超过这么久没有新的有效帧就判定掉线, 必须停车。
+ * 50RPM 下 200ms 约跑 1.7cm, 再长就纯靠惯性了。 */
+#define YAW_IMU_TIMEOUT_MS      (200u)
 
 /* USER CODE END PD */
 
@@ -64,26 +86,38 @@
 
 /* USER CODE BEGIN PV */
 
-/* ==================== 航向 PD 状态 ====================
- * TIM3 中断每 20ms 计算一次 PD 输出;
- * 由 Menu 发请求, 主循环 Heading_ApplyOutput() 真正下发电机命令。
+/* ==================== 航向环状态 ====================
+ *
+ * 【数据流】
+ *   TIM3 中断(20ms):  JY901S_ReadIsr() -> PI-D -> g_yaw_output
+ *   主循环:           取 g_yaw_output 当 omega, 交给 Car_Mecanum()
+ *
+ * 中断里"只算不发": Car_Mecanum() 只是塞队列, 但航向修正不需要
+ * 20ms 级的下发精度, 让它留在主循环里更简单。
+ *
+ * g_yaw_output 是 32 位 float, Cortex-M4 上单次写入是原子的,
+ * 主循环直接读不会读到"写了一半"的值, 所以不需要临界区。
  * ==================================================== */
 
-/* PE0 在 Mode Select 页启停 PD 计算；上电默认关闭。 */
-volatile uint8_t g_yaw_loop_enable = 0;
-
-/* Menu 模块通过此标志请求开始/停止 PD 计算。 */
-volatile uint8_t g_mode_run_request = 0;
+/* 1 = 中断里每拍计算并更新 g_yaw_output */
+volatile uint8_t g_yaw_loop_enable = 0u;
 
 /* 目标航向(度), 相对 JY901S_ZeroYaw() 的清零点 */
 volatile float   g_yaw_target = 0.0f;
 
-/* 可在线整定的 PD 参数。 */
-volatile float   g_yaw_kp = YAW_PID_KP_DEFAULT;
-volatile float   g_yaw_kd = YAW_PID_KD_DEFAULT;
+/* 可在线整定的参数(无线串口可以改) */
+volatile float   g_yaw_kp = YAW_KP_DEFAULT;
+volatile float   g_yaw_ki = YAW_KI_DEFAULT;
+volatile float   g_yaw_kd = YAW_KD_DEFAULT;
 
-/* 中断算出的 PD 输出(RPM)。 */
+/* 中断算出的航向修正量(RPM) */
 volatile float   g_yaw_output = 0.0f;
+
+/* 输出限幅(RPM), 由 YawLoop_Enable() 设定 */
+volatile float   g_yaw_out_max = YAW_OUT_MAX_DEFAULT;
+
+/* 积分器(只在中断里累加) */
+static volatile float s_yaw_integral = 0.0f;
 
 /* USER CODE END PV */
 
@@ -91,19 +125,15 @@ volatile float   g_yaw_output = 0.0f;
 void SystemClock_Config(void);
 /* USER CODE BEGIN PFP */
 
-void Heading_Task(void);                                        /* 主循环调用: 更新监测与串口上报 */
-void Heading_ApplyOutput(void);                                 /* 主循环调用: 下发输出 */
-void Heading_UpdateRunState(void);                              /* 主循环调用: 执行启动/停车请求 */
-void Gyro_SelfTest(void);                                       /* 陀螺仪单独自检, 不碰电机 */
+void  YawLoop_Enable(float target_deg, float out_max_rpm);
+void  YawLoop_Disable(void);
+int8_t YawLoop_IsImuAlive(void);
+float YawLoop_GetError(void);
 
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-
-/* 陀螺仪自检模式: 1 = 上电后只做陀螺仪测试, 不进菜单、不发任何电机命令。
- * 用来单独验证 JY901S 能不能正常工作; 调通后改回 0。 */
-#define GYRO_SELFTEST_ENABLE    0
 
 /* USER CODE END 0 */
 
@@ -125,6 +155,17 @@ int main(void)
 
   /* USER CODE BEGIN Init */
 
+  /* ★ SysTick 提到最高优先级。
+   *
+   * TIM3 的航向环中断(优先级 5)会抢占 SysTick(默认 15)。中断里读一次
+   * I2C 要 1.5ms 左右, 最长到 4.5ms, 而 SysTick 周期只有 1ms ——
+   * 一次读取就能吃掉 1~4 个 tick。SysTick 是单一位挂起标志, 被屏蔽期间
+   * 到期的多个周期只会补一次, HAL_GetTick() 就越跑越慢。
+   *
+   * 本项目所有分段时长、超时判据都基于 HAL_GetTick(), 时基慢 10% 就意味着
+   * "3.3 秒的一段"实际跑 3.6 秒, 跑图必然走位。 */
+  HAL_NVIC_SetPriority(SysTick_IRQn, 0, 0);
+
   /* USER CODE END Init */
 
   /* Configure the system clock */
@@ -137,8 +178,6 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
 
-  /* OLED only needs the GPIO software-I2C pins, so initialize it before
-   * the other peripherals and show a boot message as early as possible. */
   OLED_Init();
   OLED_ShowString(0, 0, "BOOTING...");
   OLED_Refresh();
@@ -147,70 +186,60 @@ int main(void)
   MX_I2C1_Init();
   MX_USART1_UART_Init();
   MX_USART2_UART_Init();
-  MX_USART3_UART_Init();
+  /* MX_USART3_UART_Init() 不再调用: USART3 原本给起重轴(Crane)用, */
+
   MX_TIM3_Init();
   /* USER CODE BEGIN 2 */
 
+  /* ---- 陀螺仪上电初始化(全部在 TIM3 启动之前完成) ---- */
   JY901S_Init();
 
-  OLED_ShowString(0, 0, "JY901S init...");
+  OLED_ShowString(0, 0, "IMU INIT...");
   OLED_Refresh();
 
   HAL_Delay(500);
-  (void)JY901S_ReadOnce();
+  (void)JY901S_ReadIsr();     /* 此刻还没有中断, 直接读一次探活 */
 
-#if GYRO_SELFTEST_ENABLE
-  /* 自检模式下只把回传率设成 50Hz, 方便和 20ms 的读取节奏对上;
-   * 不清零航向, 这样屏幕上直接看到模块的绝对航向。 */
-  if (jy901s_data.ready)
+  if (jy901s_data.ready == 0u)
   {
-    JY901S_SetOutputRate(JY901S_RRATE_50HZ);
-  }
-
-  Gyro_SelfTest();
-#else
-  if (!jy901s_data.ready)
-  {
-    OLED_ShowString(0, 2, "No IMU data!");
-    OLED_ShowString(0, 4, "Chk wire+pullup");
+    OLED_ShowString(0, 2, "NO IMU DATA");
+    OLED_ShowString(0, 4, "CHECK PB6/PB7");
+    OLED_ShowString(0, 5, "ADD 4.7k PULLUP");
     OLED_Refresh();
     HAL_Delay(1500);
   }
   else
   {
-    /* 6 轴算法和校准结果已经保存在模块里, 不需要每次上电重复执行 */
-    JY901S_SetOutputRate(JY901S_RRATE_50HZ);
+    /* 回传率设 100Hz(10ms 一帧), 而闭环每 20ms 读一次,
+     * 这样每次读到的都是最近 10ms 内的新数据。
+     * 该设置保存在模块里断电不丢, 这里每次上电重设一次以防万一。 */
+    JY901S_SetOutputRate(JY901S_RRATE_100HZ);
   }
 
-  /* 起跑前把当前朝向清零, 之后读到的 Yaw 都是相对这个方向 */
+  /* 把当前朝向记为 0 度基准。之后的 Yaw 都是相对这个方向的。 */
   JY901S_ZeroYaw();
-#endif
-  Key_Init();
-#if GYRO_SELFTEST_ENABLE
-  /* 自检模式只用 PE0/PE1, 不初始化菜单, 避免误触发电机命令 */
-#else
-  Menu_Init();
-#endif
 
-  /* 初始化无线串口上报(VOFA+ 波形), 只复位内部计时,
-   * 串口本身已由 MX_USART2_UART_Init() 配好。
-   * ★ 必须调用: 它内部会启动 USART2 的接收中断, VOFA+ 下发的
-   *   "P6.0"/"D0.4"/"kp,kd" 才能被解析并实时改 PD 参数。
-   *   注释掉的话波形还能发, 但参数改不了。 */
+  Key_Init();
+  InertialRun_Init();
+  Menu_Init();
+
+  /* 无线串口: 只用于上位机看波形和在线调 Kp/Ki/Kd, 不参与控制。
+   * 内部会启动 USART2 的接收中断。 */
   Wireless_Init();
 
-  /* 打开 FPU 自动/惰性压栈。
-   * TIM3 中断里做浮点 PD, 主循环也在做浮点解析; 不打开的话,
-   * 中断抢占主循环时可能破坏 s0-s15 寄存器, 造成偶发数据跳变。 */
+
+  /* 打开 FPU 自动/惰性压栈。中断里做浮点运算, 主循环也在做浮点解析,
+   * 不打开的话中断抢占主循环时可能破坏 s0-s15 寄存器。 */
 #if (__FPU_PRESENT == 1) && (__FPU_USED == 1)
   FPU->FPCCR |= FPU_FPCCR_ASPEN_Msk | FPU_FPCCR_LSPEN_Msk;
 #endif
 
-  /* 启动 TIM3 更新中断(20ms 一次), 航向角 PD 运算在中断回调里做。
-   * CubeMX 不会自动生成这一句, 不加的话中断永远不会进来。
-   * ★ 必须和 Menu.c 里的 MENU_DEBUG_HEADING_LOOP_ENABLED 同时为 1,
-   *   闭环才会真正工作。 */
-  HAL_TIM_Base_Start_IT(&htim3);
+  /* ★ 这一行是整个姿态闭环的总开关。
+   * 启动后 IMU 只由 TIM3 中断读, 主循环不能再碰 I2C。 */
+  (void)HAL_TIM_Base_Start_IT(&htim3);
+
+  /* 上电即启用航向闭环, 以当前朝向作为目标, 无需等待状态机打开。 */
+  YawLoop_Enable(jy901s_data.yaw_continuous, YAW_OUT_MAX_DEFAULT);
 
   /* USER CODE END 2 */
 
@@ -221,21 +250,24 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-#if GYRO_SELFTEST_ENABLE
-    Gyro_SelfTest();
-#else
-    JY901S_Poll();
 
-    /* 处理菜单的 PD 监测启停请求, 并上报陀螺仪/PD 数据 */
-    //Heading_Task();
+    /* 1. 按键扫描(内部 10ms 限频, 3 次一致才认) */
+    Key_Scan();
 
-    /* VOFA+ 下行命令("P6.0"/"D0.4"/"kp,kd")由 USART2 接收中断
-     * 在 HAL_UART_RxCpltCallback() 里自动解析, 这里不需要轮询。 */
+    /* 2. 跑图状态机: 计时、下发、停车、编码器确认全在里面 */
+    InertialRun_Task();
+
+    /* 3. 推进底盘发送队列。
+     *    放在菜单绘制之前 —— 菜单刷一次 OLED 要十几毫秒,
+     *    放后面会让电机指令出现不必要的延迟。 */
+    Car_TxTask();
+
+    /* 4. 界面(按键路由 + 绘制) */
+    Menu_Run();
+
     Wireless_ReportYaw();
 
-    Key_Scan();
-    Menu_Run();
-#endif
+
   }
   /* USER CODE END 3 */
 }
@@ -287,179 +319,96 @@ void SystemClock_Config(void)
 
 /* USER CODE BEGIN 4 */
 
-/* ==================== 航向角 PD 闭环参数 ==================== */
-
-/* --- 原地转向模式的输出限幅(RPM) ---
- * 下限: 步进电机转速太低是转不动的, 给一个能转起来的最小值
- * 上限: 防止误差大时冲太快甩过头 */
-#define YAW_PID_TURN_OUT_MIN    (20.0f)
-#define YAW_PID_TURN_OUT_MAX    (80.0f)
-
-/* --- 边走边修模式的输出限幅(RPM) ---
- * 这时的输出是叠加在前进/横移速度上的"左右差速修正", 不能太大,
- * 否则车会甩尾。 */
-#define YAW_PID_DRIVE_OUT_MAX   (60.0f)
-
-/* 电机命令下发间隔(ms):
- * fish_Step_All_Control() 内部有好几个 HAL_Delay(2), 一次调用要 8ms 以上,
- * 所以下发必须限频, 不能每 20ms 都发一次。 */
-#define YAW_CMD_INTERVAL_MS     (30u)
-
-#define MODE_START_YAW_TARGET   (0.0f)
-
-/* 启动后停车前的"前进基准速度(RPM)":
- *   0 = 原地靠 PD 保持航向(不前进, 最安全, 适合先验证航向保持)
- *   非 0 = 边走边修(车会持续前进, 测试前先把车架空或留出跑道)
+/* ==================== 航向环对外接口 ====================
  *
- * ★ base != 0 时不会自动停: 一边前进一边靠 PD 保持航向,
- *   除非按 PE0 停车, 否则会一直往前走。 */
-#define MODE_START_DRIVE_BASE   (0)
-
-/* 前进基准速度(RPM):
- *   = 0  -> 原地转向模式(输出有下限, 保证转得动)
- *   != 0 -> 边走边修模式(输出是差速修正量, 叠加在这个基准速度上) */
-volatile int16_t g_drive_base = 0;
-
-/* 有新结果的标志: 中断算完置 1, 主循环下发或丢弃后清 0 */
-volatile uint8_t g_yaw_output_ready = 0;
-
-/* 电机当前是否已经停车, 防止在目标点反复发 Car_Stop() */
-static uint8_t s_motor_stopped = 1;
+ * 状态机(InertialRun)只通过这四个函数跟航向环打交道。
+ * 不要去直接写 g_yaw_loop_enable / g_yaw_target —— 那样容易出现
+ * "先使能再改目标"的中间态, 让中断算出一拍错误的输出。
+ */
 
 /**
-  * @brief  陀螺仪自检: 只读不动(自检模式下由主循环反复调用)
-  * @note   1. 只驱动 JY901S_Poll(), 不发电机的任何命令,
-  *            所以可以彻底排除"陀螺仪影响电机通信"的怀疑;
-  *         2. 屏幕同时显示 I2C 读取成功率, 用来区分
-  *            "接线/上拉有问题" 和 "数据解析有问题";
-  *         3. 按 PE0 把当前朝向记为 0 度基准, 之后直接看
-  *            左转 90° 时 Yaw 是不是接近 +90;
-  *         4. 按 PE1 重新开始统计读取成功率。
+  * @brief  使能航向环
+  * @param  target_deg   目标航向(度), 一般就是起跑瞬间的当前航向
+  * @param  out_max_rpm  自转修正量的限幅(RPM), <=0 时用默认值
+  * @note   整组状态在关中断下更新(只有几个时钟周期), 所以中断要么
+  *         看到"完全没使能", 要么看到"目标和参数都已就绪"。
   */
-void Gyro_SelfTest(void)
+void YawLoop_Enable(float target_deg, float out_max_rpm)
 {
-    static uint32_t last_draw = 0;
-    static uint32_t ok_cnt    = 0;
-    static uint32_t try_cnt   = 0;
-    static uint32_t tol_cnt   = 0;
-    uint32_t now;
-    uint8_t  key;
-    uint8_t  ret;
-    char     line[24];
+    uint32_t primask = __get_PRIMASK();
 
-    /* 只读, 不动电机: 这一路代码完全不碰 USART1 */
-    ret = JY901S_Poll();
-    Key_Scan();
-
-    if (ret != 2u)          /* 2 = 还没到 20ms 的读取时刻, 不计数 */
-    {
-        /* 先取诊断标志: 它只反映本次 JY901S_ReadOnce 的结果 */
-        uint8_t tol = JY901S_TakeDiagLatch();
-
-        try_cnt++;
-        if (ret == 0u)
-        {
-            ok_cnt++;
-        }
-        else if (tol)
-        {
-            /* 传输成功但两次数据差太多: 跨刷新点或误码 */
-            tol_cnt++;
-        }
-    }
-
-    key = Key_GetPress();
-    if (key == KEY_1)
-    {
-        /* 把当前朝向记为 0 度: 之后屏幕上的 Yaw 就是相对角,
-         * 左转 90 度应接近 +90, 右转 90 度应接近 -90。 */
-        JY901S_ZeroYaw();
-    }
-    else if (key == KEY_2)
-    {
-        ok_cnt  = 0;
-        try_cnt = 0;
-        tol_cnt = 0;
-    }
-
-    now = HAL_GetTick();
-    if ((now - last_draw) < 200u)
-    {
-        return;
-    }
-    last_draw = now;
-
-    OLED_ClearBuffer();
-
-    if (!jy901s_data.ready)
-    {
-        (void)snprintf(line, sizeof(line), "OK:%lu/%lu TOL:%lu",
-                       (unsigned long)ok_cnt, (unsigned long)try_cnt,
-                       (unsigned long)tol_cnt);
-        OLED_ShowString(0, 0, "JY901S SELFTEST");
-        OLED_ShowString(0, 1, line);
-        (void)snprintf(line, sizeof(line), "Bus:%luHz",
-                       (unsigned long)JY901S_GetBusSpeed());
-        OLED_ShowString(0, 2, line);
-        OLED_ShowString(0, 4, "No data from IMU");
-        OLED_ShowString(0, 6, "Check PB6/PB7 4k7");
-        OLED_ShowString(0, 7, "PE1:recount");
-    }
-    else
-    {
-        /* Yaw 是相对 PE0 清零点的角度, 直接用来验证 90 度转向 */
-        (void)snprintf(line, sizeof(line), "Yaw:%7.1f", (double)jy901s_data.yaw);
-        OLED_ShowString(0, 0, line);
-
-        (void)snprintf(line, sizeof(line), "Gz:%7.1f", (double)jy901s_data.gz);
-        OLED_ShowString(0, 1, line);
-
-        (void)snprintf(line, sizeof(line), "Roll:%6.1f", (double)jy901s_data.roll);
-        OLED_ShowString(0, 2, line);
-
-        (void)snprintf(line, sizeof(line), "Pit:%7.1f", (double)jy901s_data.pitch);
-        OLED_ShowString(0, 3, line);
-
-        /* Z 轴加速度: 水平静止时应在 1.0g 附近, 可用来验证模块装平了 */
-        (void)snprintf(line, sizeof(line), "Az:%7.2fg", (double)jy901s_data.az);
-        OLED_ShowString(0, 4, line);
-
-        /* OK = 成功/总次数, TOL = 因"两次差太多"被丢弃的次数 */
-        (void)snprintf(line, sizeof(line), "OK:%lu/%lu TOL:%lu",
-                       (unsigned long)ok_cnt, (unsigned long)try_cnt,
-                       (unsigned long)tol_cnt);
-        OLED_ShowString(0, 5, line);
-
-        /* 总线速率: 传输失败时 HAL 会自动降速, 低于 100k 说明信号差 */
-        (void)snprintf(line, sizeof(line), "Bus:%luHz",
-                       (unsigned long)JY901S_GetBusSpeed());
-        OLED_ShowString(0, 6, line);
-
-        OLED_ShowString(0, 7, "PE0:zero PE1:rst");
-    }
-
-    OLED_Refresh();
+    __disable_irq();
+    g_yaw_loop_enable = 0u;
+    g_yaw_output      = 0.0f;
+    s_yaw_integral    = 0.0f;
+    g_yaw_target      = target_deg;
+    g_yaw_out_max     = (out_max_rpm > 0.0f) ? out_max_rpm : YAW_OUT_MAX_DEFAULT;
+    g_yaw_loop_enable = 1u;
+    __set_PRIMASK(primask);
 }
 
 /**
-  * @brief  定时器中断回调: 航向角 PD 运算
-  * @param  htim  触发中断的定时器句柄
-  * @note   TIM3 配置成 20ms 一次, 所以这个函数每 20ms 进来一次。
+  * @brief  关闭航向环
+  * @note   关闭后中断不再更新 g_yaw_output(保持为 0), 但 IMU 仍然
+  *         每 20ms 读一次 —— 下次起跑时数据是热的, 不用等 I2C 重新稳定。
+  */
+void YawLoop_Disable(void)
+{
+    uint32_t primask = __get_PRIMASK();
+
+    __disable_irq();
+    g_yaw_loop_enable = 0u;
+    g_yaw_output      = 0.0f;
+    s_yaw_integral    = 0.0f;
+    __set_PRIMASK(primask);
+}
+
+/**
+  * @brief  陀螺仪是否还在正常出数
+  * @retval 1 = 正常, 0 = 掉线
+  * @note   运行中返回 0 必须立刻停车: 没有航向反馈的闭环比开环更危险。
+  */
+int8_t YawLoop_IsImuAlive(void)
+{
+    if (jy901s_data.ready == 0u)
+    {
+        return 0;
+    }
+
+    if ((uint32_t)(HAL_GetTick() - JY901S_GetUpdateTick()) > YAW_IMU_TIMEOUT_MS)
+    {
+        return 0;
+    }
+
+    return 1;
+}
+
+/**
+  * @brief  当前航向误差(度), 只用于显示
+  */
+float YawLoop_GetError(void)
+{
+    return g_yaw_target - jy901s_data.yaw_continuous;
+}
+
+/**
+  * @brief  定时器中断回调: 读 IMU + 航向闭环运算(TIM3, 20ms 一次)
+  * @note   顺序:
+  *           1. 读 I2C(全工程唯一访问点)
+  *           2. 没使能闭环 -> 输出清零返回
+  *           3. 本拍没读到有效数据 -> 沿用上一拍输出, 不积分
+  *           4. err = target - yaw
+  *           5. u = Kp*err + ∫ - Kd*gz, 限幅后写入 g_yaw_output
   *
-  *         运算流程:
-  *           误差 err = 目标航向 - 当前航向
-  *           输出 u   = Kp * err - Kd * gz      (gz 是陀螺仪 Z 轴角速度)
-  *           限幅后存进 g_yaw_output, 由主循环下发电机命令
-  *
-  *         中断内只做数值运算, 不进行阻塞式外设操作。
+  *         ★ 中断里绝对不能出现 HAL_Delay: TIM3 优先级 5 高于
+  *           SysTick 的默认优先级, 在里面等 tick 会永久卡死。
   */
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
-    JY901S_Data_t imu;
     float err;
     float u;
+    float integral;
     float out_max;
-    float out_min;
 
     /* 这个回调是所有定时器共用的, 先确认是 TIM3 触发 */
     if (htim->Instance != TIM3)
@@ -467,220 +416,71 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
         return;
     }
 
-    /* ---- 0. 取一份一致的 IMU 快照 ----
-     * 主循环每次更新 jy901s_data 都会屏蔽本中断, 所以拿到的
-     * yaw/gz 一定来自同一帧, 不会读到改了一半的数据。 */
-    if (!JY901S_TryRead(&imu))
+    /* ---- 1. 读 IMU ----
+     * 读失败或坏帧时 jy901s_data 仍是上一拍的合法值,
+     * 所以下面照样可以继续闭环, 只是这一拍不积分。 */
     {
-        g_yaw_output = 0.0f;
-        return;
-    }
+        uint8_t ok = JY901S_ReadIsr();
 
-    /* ---- 1. 航向误差 ----
-     * 用 yaw_continuous(连续角度), 这样转过 ±180 也不会跳变 */
-    err = g_yaw_target - imu.yaw_continuous;
-
-    /* ---- 2. 航向死区 ----
-     * 误差落在容差内时输出归零, 避免小误差造成输出抖动 */
-    if ((err <= YAW_PID_TOLERANCE) && (err >= -YAW_PID_TOLERANCE))
-    {
-        g_yaw_output = 0.0f;
-    }
-    else
-    {
-        /* ---- 3. PD 运算 ----
-         * 比例项: 误差越大转得越快
-         * 微分项: 直接用陀螺仪角速度做阻尼, 不用自己差分, 没有噪声放大。
-         *         gz > 0 表示模块检测到左转, 减去它作为阻尼项 */
-        u = (g_yaw_kp * err) - (g_yaw_kd * imu.gz);
-
-        /* 限制输出幅值; 是否下发电机由主循环决定 */
-        out_max = YAW_PID_DRIVE_OUT_MAX;
-        out_min = 0.0f;
-
-        /* 按误差方向分段限幅: 输出永远指向目标那一侧,
-         * 即使微分项再大也不会把方向顶反 */
-        if (err > 0.0f)
+        if (g_yaw_loop_enable == 0u)
         {
-            if (u > out_max)
-            {
-                u = out_max;
-            }
-            else if (u < out_min)
-            {
-                u = out_min;
-            }
-        }
-        else
-        {
-            if (u < -out_max)
-            {
-                u = -out_max;
-            }
-            else if (u > -out_min)
-            {
-                u = -out_min;
-            }
-        }
-
-        g_yaw_output = u;
-    }
-}
-
-void Heading_Task(void)
-{
-    static uint8_t s_applied_request = 0;
-
-    if (g_mode_run_request != s_applied_request)
-    {
-        s_applied_request = g_mode_run_request;
-        g_yaw_output = 0.0f;
-        if (s_applied_request)
-        {
-            g_yaw_target = jy901s_data.yaw_continuous;
-            g_yaw_loop_enable = 1;
-        }
-        else
-        {
-            g_yaw_loop_enable = 0;
-        }
-    }
-
-    Wireless_ReportYaw();
-}
-
-/**
-  * @brief  把中断算出的航向输出下发给电机(主循环里反复调用)
-  * @note   内部做了三件事:
-  *           1. 限频 30ms —— fish_Step_All_Control() 一次要 8ms 以上
-  *           2. (基准速度, 修正量) 没变化就不重发 —— 电机收到后会保持
-  *           3. 走 Car_Drive(), 也就是麦轮的"前进 + 自转修正"合成
-  *
-  *         两种工况都由 Car_Drive() 统一处理, 不需要分支:
-  *           原地转向: base = 0,   turn = 输出  -> 右轮正转/左轮反转, 原地打转
-  *           边走边修: base = 转速, turn = 输出  -> 左右轮差速, 边跑边纠偏
-  *           已经到位(base = 0 且 turn = 0)     -> 停车
-  */
-void Heading_ApplyOutput(void)
-{
-    static uint32_t last_cmd_tick = 0;
-    uint32_t now;
-    int16_t  base;
-    int16_t  turn;
-
-    /* ---- 处理菜单(模式选择页)发来的启动/停车请求 ---- */
-    Heading_UpdateRunState();
-
-    /* ---- 电机没启动: PD 照常计算, 但结果不下发 ----
-     * 清掉 ready, 避免停止期间积压的结果在下次启动时被误发。 */
-    if (!g_mode_run_request)
-    {
-        g_yaw_output_ready = 0;
-        return;
-    }
-
-    /* 中断还没有算出新结果, 直接返回 */
-    if (!g_yaw_output_ready)
-    {
-        return;
-    }
-
-    /* 限频: 上一次下发还没过 30ms 就先不发 */
-    now = HAL_GetTick();
-    if ((now - last_cmd_tick) < YAW_CMD_INTERVAL_MS)
-    {
-        return;
-    }
-
-    last_cmd_tick      = now;
-    g_yaw_output_ready = 0;
-
-    base = g_drive_base;
-    turn = (int16_t)g_yaw_output;   /* float 转整数, 顺带滤掉小于 1 转的抖动 */
-
-    if ((base == 0) && (turn == 0))
-    {
-        /* 原地转向模式 + 已经到位 -> 停车(只在第一次进入时发) */
-        if (!s_motor_stopped)
-        {
-            s_motor_stopped = 1;
-            Car_Stop();
-        }
-    }
-    else
-    {
-        /* 麦轮: 前进 + 自转修正 */
-        s_motor_stopped = 0;
-        Car_Drive(base, turn);
-    }
-}
-
-/**
-  * @brief  启动电机(内部使用, 只能在主循环里调用)
-  * @note   PD 运算本来就在中断里一直跑, 这里只准备电机启动参数。
-  *         g_yaw_output_ready 置 1 是为了让主循环下一拍立刻把 PD 输出发出去。
-  */
-static void heading_do_start(void)
-{
-    g_yaw_target       = MODE_START_YAW_TARGET;
-    g_drive_base       = MODE_START_DRIVE_BASE;
-    g_yaw_output       = 0.0f;
-    g_yaw_output_ready = 1;                    /* 强制下发一次初始命令 */
-    s_motor_stopped    = 0;
-
-    Car_Drive(g_drive_base, 0);
-}
-
-/**
-  * @brief  停止电机(内部使用, 只能在主循环里调用)
-  * @note   PD 运算不受影响, 仍会继续更新 g_yaw_output。
-  */
-static void heading_do_stop(void)
-{
-    g_drive_base       = 0;
-    g_yaw_output       = 0.0f;
-    g_yaw_output_ready = 0;
-    s_motor_stopped    = 1;
-
-    Car_Stop();
-}
-
-/**
-  * @brief  处理菜单(模式选择页)发来的启动/停车请求(主循环里反复调用)
-  * @note   和菜单模块之间靠 g_mode_run_request 这个标志通信:
-  *             标志变化 -> 执行启动或停车
-  *         上一状态记在模块内部, 所以反复调用不会重复动作,
-  *         只在标志真正翻转的那一次才干活。
-  */
-void Heading_UpdateRunState(void)
-{
-    static uint8_t s_applied = 0;   /* 已经执行过的请求值(上电默认停车) */
-
-    if (g_mode_run_request == s_applied)
-    {
-        return;                     /* 没有新请求 */
-    }
-
-    s_applied = g_mode_run_request;
-
-    if (s_applied)
-    {
-        /* IMU 没读到数据时禁止启动:
-         * 否则 yaw 一直是 0, 目标 90° 会让车开环一直转。
-         * 把请求清回 0, 让菜单状态也回到 STOP。 */
-        if (!jy901s_data.ready)
-        {
-            g_mode_run_request = 0;
-            s_applied = 0;
+            g_yaw_output   = 0.0f;
+            s_yaw_integral = 0.0f;
             return;
         }
 
-        heading_do_start();
+        if ((ok == 0u) || (jy901s_data.ready == 0u))
+        {
+            /* 数据过期: 保持上一拍的修正量, 不重新计算 */
+            return;
+        }
     }
-    else
+
+    /* ---- 2. 航向误差(用连续角度, 转过 ±180 也不跳变) ---- */
+    err = g_yaw_target - jy901s_data.yaw_continuous;
+
+    /* ---- 3. 积分器 ----
+     * 死区内不累加; 大误差(被撞歪/刚起跑)直接清零, 免得老账一直反着顶。 */
+    integral = s_yaw_integral;
+
+    if ((err > YAW_INT_RESET_DEG) || (err < -YAW_INT_RESET_DEG))
     {
-        heading_do_stop();
+        integral = 0.0f;
     }
+    else if ((err > YAW_DEADBAND_DEG) || (err < -YAW_DEADBAND_DEG))
+    {
+        integral += (err * g_yaw_ki * YAW_DT_S);
+
+        if (integral > YAW_INT_MAX_RPM)
+        {
+            integral = YAW_INT_MAX_RPM;
+        }
+        else if (integral < -YAW_INT_MAX_RPM)
+        {
+            integral = -YAW_INT_MAX_RPM;
+        }
+    }
+
+    s_yaw_integral = integral;
+
+    /* ---- 4. PI-D ---- */
+    u = (g_yaw_kp * err) + integral - (g_yaw_kd * jy901s_data.gz);
+
+    /* ---- 5. 对称限幅 ----
+     * 不做"按误差方向单边截断": 那等于把阻尼项在反向时也砍掉,
+     * 车一到目标附近就会反复过冲。 */
+    out_max = g_yaw_out_max;
+
+    if (u > out_max)
+    {
+        u = out_max;
+    }
+    else if (u < -out_max)
+    {
+        u = -out_max;
+    }
+
+    g_yaw_output = u;
 }
 
 /* USER CODE END 4 */
