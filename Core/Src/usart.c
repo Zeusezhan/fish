@@ -74,6 +74,13 @@ void MX_USART2_UART_Init(void)
 
   /* USER CODE END USART2_Init 1 */
   huart2.Instance = USART2;
+  /* 9600: 无线蓝牙模块固定这个速率, 不能改。
+   *
+   * ★ 带宽很紧张, 所以上报周期必须放宽:
+   *     一帧 5 通道约 32 字节, 9600bps 下需要 32*10/9600 ≈ 33ms
+   *     而 WIRELESS_REPORT_PERIOD_MS = 40ms, 余量只有 7ms
+   *   如果再缩短周期或增加通道, 就会发不完 -> 帧被截断 -> VOFA+ 乱码。
+   *   调参时如果发现波形掉点/乱码, 优先把上报周期调大到 60~80ms。 */
   huart2.Init.BaudRate = 9600;
   huart2.Init.WordLength = UART_WORDLENGTH_8B;
   huart2.Init.StopBits = UART_STOPBITS_1;

@@ -34,10 +34,18 @@
 #include "main.h"
 
 /* ---- 上报周期(ms) ----
- * 别设太小: 每帧约 15 字节在 9600 下要传约 16ms, 周期太短会撞上
- * 上一次没发完 -> HAL_UART_Transmit_DMA 返回 HAL_BUSY -> 波形丢帧。
- * 40ms(25Hz) 时占用率约 40%, 比较稳; 想更快可把波特率提到 115200。 */
-#define WIRELESS_REPORT_PERIOD_MS   (40u)
+ * 别设太小: 上一次没发完时 HAL_UART_Transmit_DMA 会返回 HAL_BUSY,
+ * 那一帧就丢了, 波形上表现为随机掉点。
+ *
+ * ★ 9600bps 下的带宽核算(无线蓝牙模块固定 9600, 不能改):
+ *     可用吞吐 = 9600 / 10 = 960 字节/秒
+ *     一帧 5 通道约 32 字节 => 单帧占用约 33ms
+ *       周期 40ms : 占用 83%  -> 过载, 会丢帧, 参数下发也容易失败
+ *       周期 60ms : 占用 56%  -> 推荐, 波形连续且给下行命令留出余量
+ *       周期 80ms : 占用 42%  -> 更稳, 但波形刷新略慢
+ *   若调参时发现波形掉点、或 VOFA+ 发的 "P6.0" 不生效,
+ *   优先把这里调大到 80u。 */
+#define WIRELESS_REPORT_PERIOD_MS   (60u)
 
 /**
   * @brief  初始化无线串口上报模块
@@ -62,7 +70,12 @@ void Wireless_StartReceive(void);
   *           不会占用 CPU 等待, 所以可以放心在中断里调用。
   *         内部带周期限频, 比 WIRELESS_REPORT_PERIOD_MS 更密的调用
   *         会被自动跳过, 所以直接无脑调用即可。
-  *         帧格式: "目标,当前,Kp,Kd\n", Kp/Kd 是当前实际生效的 PD 参数。
+  *         帧格式(VOFA+ FireWater): "目标,当前,Kp,Kd,误差\n"
+  *           CH0 = 目标航向
+  *           CH1 = 当前航向
+  *           CH2 = 当前 Kp(确认滑块生效)
+  *           CH3 = 当前 Kd
+  *           CH4 = 航向误差(目标-当前), 调 PD 主要看这条
   */
 void Wireless_SendYaw(float target_yaw_deg, float current_yaw_deg);
 

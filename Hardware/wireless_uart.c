@@ -30,13 +30,19 @@ extern volatile float g_yaw_kd;
 #include "jy901s.h"
 
 /* ---- 上报通道数:
- *   0 = 目标航向, 1 = 当前航向, 2 = 当前 Kp, 3 = 当前 Kd ----
- * 把 Kp/Kd 也回传, 拖动滑块后能立刻在波形上确认参数有没有生效。 */
-#define WIRELESS_CHANNELS       (4u)
+ *   0 = 目标航向, 1 = 当前航向, 2 = 当前 Kp, 3 = 当前 Kd, 4 = 航向误差
+ *
+ * 为什么要有误差通道: 调 PD 时最关心的是"误差收敛得快不快、有没有
+ * 来回摆", 直接看误差曲线比看两条几乎重合的角度曲线直观得多。
+ *
+ * 说明: 目标/当前/Kp/Kd 之外再单独发误差, 是为了在 VOFA+ 里能
+ * 把误差单独放大显示; 误差 = 目标 - 当前, 也可以在 VOFA+ 里用
+ * 表达式算, 但占用一个通道更省事。 */
+#define WIRELESS_CHANNELS       (5u)
 
 /* ---- 单帧最大字节数 ----
- * 4 个浮点数(各最多约 8 字节) + 逗号 + 结束符, 48 字节绰绰有余 */
-#define WIRELESS_FRAME_MAX      (48u)
+ * 5 个浮点数(各最多约 8 字节) + 逗号 + 结束符, 64 字节绰绰有余 */
+#define WIRELESS_FRAME_MAX      (64u)
 
 /* ---- 下行(PC -> 芯片)命令缓冲 ----
  * 协议: "kp,kd\n", 例如 "6.0,0.4"。32 字节足够, 多出来的直接丢弃。 */
@@ -402,8 +408,9 @@ void Wireless_SendYaw(float target_yaw_deg, float current_yaw_deg)
 
     s_last_report_tick = now;
 
-    /* ---- 组帧: "目标,当前,Kp,Kd\n" ----
-     * 把当前 Kp/Kd 也回传, 拖动滑块后能立刻在波形上看到参数有没有生效 */
+    /* ---- 组帧: "目标,当前,Kp,Kd,误差\n" ----
+     * 把当前 Kp/Kd 也回传, 拖动滑块后能立刻在波形上看到参数有没有生效;
+     * 误差通道用来观察收敛速度和是否来回摆。 */
     wireless_append_float((char *)s_tx_buf, &pos, target_yaw_deg, WIRELESS_DECIMALS);
     s_tx_buf[pos++] = ',';
     wireless_append_float((char *)s_tx_buf, &pos, current_yaw_deg, WIRELESS_DECIMALS);
@@ -411,6 +418,9 @@ void Wireless_SendYaw(float target_yaw_deg, float current_yaw_deg)
     wireless_append_float((char *)s_tx_buf, &pos, g_yaw_kp, WIRELESS_DECIMALS);
     s_tx_buf[pos++] = ',';
     wireless_append_float((char *)s_tx_buf, &pos, g_yaw_kd, WIRELESS_DECIMALS);
+    s_tx_buf[pos++] = ',';
+    wireless_append_float((char *)s_tx_buf, &pos,
+                          target_yaw_deg - current_yaw_deg, WIRELESS_DECIMALS);
     s_tx_buf[pos++] = WIRELESS_FRAME_END;
 
     /* ---- 非阻塞发送, 立刻返回 ---- */

@@ -46,8 +46,12 @@
 #define YAW_PID_KP_DEFAULT      (4.0f)      /* 比例: 航向误差 1 度给多少转速 */
 #define YAW_PID_KD_DEFAULT      (0.35f)     /* 微分: 阻尼项, 压住过冲 */
 
-/* 航向死区: 误差小于该角度时输出为零 */
-#define YAW_PID_TOLERANCE       (2.0f)
+/* 航向死区: 误差绝对值小于该角度时输出为零(单位: 度)。
+ * 作用是抑制小误差造成的抖动 —— 误差在 ±0.3° 内认为"已经正了",
+ * 不再输出修正, 避免电机在目标点附近来回微调。
+ * ★ 不要设得太小: 陀螺噪声就有 ±0.2~0.5°, 死区比噪声还小的话
+ *   等于没有死区, 电机会跟着噪声抖。 */
+#define YAW_PID_TOLERANCE       (0.3f)
 
 /* USER CODE END PD */
 
@@ -189,8 +193,11 @@ int main(void)
 #endif
 
   /* 初始化无线串口上报(VOFA+ 波形), 只复位内部计时,
-   * 串口本身已由 MX_USART2_UART_Init() 配好 */
-  //Wireless_Init();
+   * 串口本身已由 MX_USART2_UART_Init() 配好。
+   * ★ 必须调用: 它内部会启动 USART2 的接收中断, VOFA+ 下发的
+   *   "P6.0"/"D0.4"/"kp,kd" 才能被解析并实时改 PD 参数。
+   *   注释掉的话波形还能发, 但参数改不了。 */
+  Wireless_Init();
 
   /* 打开 FPU 自动/惰性压栈。
    * TIM3 中断里做浮点 PD, 主循环也在做浮点解析; 不打开的话,
@@ -200,11 +207,10 @@ int main(void)
 #endif
 
   /* 启动 TIM3 更新中断(20ms 一次), 航向角 PD 运算在中断回调里做。
-   * CubeMX 不会自动生成这一句, 不加的话中断永远不会进来。 */
-  /* 当前只调试底盘运动, 暂时不启动航向 PD 中断;
-   * 需要"边调试边闭环"时把下面这行取消注释, 并把 Menu.c 里的
-   * MENU_DEBUG_HEADING_LOOP_ENABLED 改为 1。 */
-  /* HAL_TIM_Base_Start_IT(&htim3); */
+   * CubeMX 不会自动生成这一句, 不加的话中断永远不会进来。
+   * ★ 必须和 Menu.c 里的 MENU_DEBUG_HEADING_LOOP_ENABLED 同时为 1,
+   *   闭环才会真正工作。 */
+  HAL_TIM_Base_Start_IT(&htim3);
 
   /* USER CODE END 2 */
 

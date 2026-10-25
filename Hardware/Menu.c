@@ -31,7 +31,13 @@ extern volatile float   g_yaw_output;
 
 /* 调试页航向闭环开关: 1 = 启动时记录目标航向并下发纠偏命令。
  * ★ 只有它和 main.c 里的 HAL_TIM_Base_Start_IT(&htim3) 同时打开,
- *   PD 才会真正算出来并下发; 少了任何一个都会退化成开环运动。 */
+ *   PD 才会真正算出来并下发; 少了任何一个都会退化成开环运动。
+ *
+ * 【调试阶段对照表】
+ *   第二轮(验证方向/停车/编码器): 本宏 = 0, TIM3 注释掉  -> "RUN NO PID"
+ *   第三轮(调航向闭环):           本宏 = 1, TIM3 打开      -> 显示 YawErr
+ *   若本宏=1 而 TIM3 没开: 修正量恒为 0, 车照常走但屏幕上
+ *   显示的 YawErr 是假数据, 会误导判断 —— 所以第二轮必须置 0。 */
 #define MENU_DEBUG_HEADING_LOOP_ENABLED   1
 
 #define MENU_DEBUG_SPEED_RPM       50u
@@ -42,8 +48,17 @@ extern volatile float   g_yaw_output;
 /* 航向环输出刷新周期(ms), 与 TIM3 的 20ms 运算周期一致 */
 #define MENU_DEBUG_STEER_MS        20u
 
-/* 跑动中多久没读到新数据就认为陀螺仪掉线(ms), 掉线立即停车 */
-#define MENU_DEBUG_IMU_TIMEOUT_MS  100u
+/* 跑动中多久没读到新数据就认为陀螺仪掉线(ms), 掉线立即停车。
+ *
+ * ★ 这个阈值不能设太小。原因是主循环的时序:
+ *     每轮 = JY901S_Poll(20ms限频) + 电机命令(内部4个HAL_Delay≈8ms)
+ *            + OLED 整屏刷新(软件I2C, 可能几十ms)
+ *   单轮耗时可能接近 100ms, 期间 imu_tick 不会更新。
+ *   阈值若只有 100ms, 就会把"主循环忙一轮"误判成"传感器掉线",
+ *   表现为"给了 4 秒却只跑 1 秒就停"。
+ *   600ms 相当于连续 6 次轮询都失败才算真掉线, 既能容忍主循环
+ *   偶发卡顿, 又能在真断线时及时停车。 */
+#define MENU_DEBUG_IMU_TIMEOUT_MS  600u
 
 /* 秒数以 0.1 秒为单位保存, 便于用整数精确计时 */
 #define MENU_DEBUG_MIN_TENTH_SECONDS    10u     /* 1.0 秒 */
