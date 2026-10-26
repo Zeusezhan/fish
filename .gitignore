@@ -18,6 +18,7 @@ MDK-ARM/fish/*
 *_sct.Bak
 *.iex
 *.tra
+*.lst
 
 # ==================== Keil 用户本地配置 ====================
 # uvguix 是窗口布局, 每台机器不同, 提交上去只会互相覆盖
@@ -39,4 +40,3 @@ desktop.ini
 ~$*.xlsx
 *.tmp
 *.log
-!MDK-ARM/motor_map_build.log
