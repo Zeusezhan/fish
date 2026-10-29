@@ -53,9 +53,9 @@
  *   2. 再加 Kd 把晃动压下去;
  *   3. 最后加一点点 Ki 消掉残余的稳态偏航。
  */
-#define YAW_KP_DEFAULT          (4.0f)      /* 比例: 误差 1 度给多少 RPM */
-#define YAW_KI_DEFAULT          (0.30f)     /* 积分: 单位 RPM/(度*秒) */
-#define YAW_KD_DEFAULT          (0.35f)     /* 微分: 阻尼, 作用于 gz */
+#define YAW_KP_DEFAULT          (9.0f)     /* 比例: 误差 1 度给多少 RPM */
+#define YAW_KI_DEFAULT          (0.0f)     /* 积分: 单位 RPM/(度*秒) */
+#define YAW_KD_DEFAULT          (0.0f)     /* 微分: 阻尼, 作用于 gz */
 
 /* 控制周期(秒), 必须与 TIM3 的 20ms 一致 */
 #define YAW_DT_S                (0.02f)

@@ -6,17 +6,26 @@
  *   段 | 动作 | 时长  | M1(右前) | M2(右后) | M3(左前) | M4(左后)
  *   ---+------+-------+----------+----------+----------+----------
  *    1 | 直行 | 3.3 s | -163366  | -163376  |  163364  |  163316
- *    2 | 左移 | 3.8 s | -190748  |  190824  | -190716  |  190860
  *    3 | 直行 | 4.8 s | -245282  | -245226  |  245424  |  245312
- *    4 | 左移 | 4.4 s | -223452  |  223526  | -223504  |  223569
  *    5 | 直行 | 4.9 s | -250764  | -250806  |  250700  |  250712
  *
- *   符号规律(五段完全一致): 直行 M1/M2 为负、M3/M4 为正;
- *   左移 M1/M3 为负、M2/M4 为正 —— 直接反映底盘的方向映射, 不要随意改。
- *   同一段内四轮脉冲极差都在 200 以内, 速度约 49500~51200 脉冲/秒。
+ *   直行段符号(三段完全一致): M1/M2 为负、M3/M4 为正 —— 直接反映底盘的
+ *   方向映射, 不要随意改。同一段内四轮脉冲极差都在 200 以内,
+ *   速度约 49500~51200 脉冲/秒。
+ *
+ *   ★ 原来第 2/4 段是"左移", 那组数据保留在下方注释里以便回溯; 现在
+ *     路径已改成"直行 + 原地转 90 度", 不再跑横移段。
+ *       2 | 左移 | 3.8 s | -190748 |  190824 | -190716 |  190860
+ *       4 | 左移 | 4.4 s | -223452 |  223526 | -223504 |  223569
  *
  *   ★ 这组数据是在 "1=右前 2=右后 3=左前 4=左后、DIR_INVERT=0,0,1,1"
  *     那套映射下采的。若改动 function.c 里的电机映射, 本表必须重采。
+ *
+ * 【为什么放弃横移】
+ *   麦轮横移时辊子在地面上是侧向滚动, 侧向抓地力只有纵向的约七成,
+ *   而四轮摩擦不均产生的偏航力矩并不小。同样 30RPM 的自转修正,
+ *   直行时压得住, 横移时压不住, 表现就是"左移段怎么调都修不回来"。
+ *   改成"直行 + 陀螺仪闭环转向"后, 每一段都是纵向受力, 闭环稳定。
  * ============================================================ */
 
 #include "main.h"
@@ -27,12 +36,35 @@
 
 /* ==================== 可调参数 ==================== */
 
-/* 平移速度(RPM)。和上面采数据时一致, 改它必须重采时长表。 */
+/* 平移速度(RPM), 只用于直行/横移/后退。和上面采数据时一致,
+ * 改它必须重采直行时长表(k_auto_path 里的 duration_ms)。 */
 #define IR_SPEED_RPM            50
 
-/* 航向修正量限幅(RPM)。横移时 50RPM 平移配 ±30RPM 修正,
- * 轮速落在 20~80 之间, 既有纠偏能力又不会甩尾。 */
+/* 直行时的航向修正量限幅(RPM)。
+ * 50RPM 直行配 ±30RPM 修正, 轮速落在 20~80 之间,
+ * 既有纠偏能力又不会甩尾。转向段不走这个限幅(见下)。 */
 #define IR_TURN_MAX             30.0f
+
+/* ---- 原地转向参数 ----
+ *
+ * 转向靠陀螺仪闭环完成: 目标角 = 开始转那一刻的航向 ± 90 度, 每 20ms
+ * 读一次剩余角度, 用纯自转命令 Car_Mecanum(0, 0, omega) 转过去。
+ * ★ 转向不经过航向环的 g_yaw_output, 也不受 IR_TURN_MAX(30) 限幅,
+ *   速度由 ir_apply_turn() 按剩余角度直接分档给出。
+ *
+ * IR_TURN_RPM     转向时的最高自转速度(RPM)。麦轮原地转要克服辊子的
+ *                 侧向摩擦, 比直行吃力, 所以给得比平移稍低但起步要够;
+ *                 太大容易冲过目标再往回摆。
+ * IR_TURN_TOL_DEG 到位容差(度)。剩余角度进这个带就认为转到位, 立即停车。
+ *                 ★ 设太小(比如 0.3)会因为陀螺噪声在边界反复进出, 车身
+ *                   抖一下才停; 设太大则每段都留几度残余。
+ *                 注意这是"每段独立 ±90 度"的判据, 误差不会累积。
+ * IR_TURN_TIMEOUT 保护超时(ms)。转 90 度理论只要 1~2 秒, 给足 5 秒;
+ *                 超时说明被卡住或陀螺仪不跟, 直接报错停机,
+ *                 绝不能让车一直原地打转。 */
+#define IR_TURN_RPM             40
+#define IR_TURN_TOL_DEG         1.0f
+#define IR_TURN_TIMEOUT_MS      5000u
 
 /* 运行中下发底盘命令的周期(ms)。每拍都重发同一组速度是故意的:
  * 命令幂等, 驱动器漏收一帧下一拍就补上了, 比"只在变化时发"抗干扰。 */
@@ -61,10 +93,13 @@
 
 /* ==================== 内部类型 ==================== */
 
+/* 路径表的一项。move 可以是 IR_MOVE_FWD 或 IR_MOVE_TURN_L/R。
+ * duration_ms 只在直行段有效; 转向段的时长由陀螺仪闭环决定,
+ * 这一项填 0, 运行时会被替换成 IR_TURN_TIMEOUT_MS 当超时上限。 */
 typedef struct
 {
     uint8_t  move;          /* InertialMove_t */
-    uint16_t duration_ms;
+    uint16_t duration_ms;   /* 直行: 运行时长; 转向: 填 0(用超时) */
 } IrPathSeg_t;
 
 typedef enum
@@ -75,13 +110,28 @@ typedef enum
 
 /* ==================== 预设路径 ==================== */
 
+/* 自动跑图的 5 段全部是"直行", 段与段之间插入 90 度原地转向。
+ *
+ * 转向动作写成路径里的一项(duration_ms 不使用), 由状态机识别后
+ * 走 IR_TURNING 分支 —— 这样路径表一眼能看出完整轨迹:
+ *
+ *   段1 直行 -> 左转90 -> 段2 直行 -> 右转90 -> 段3 直行
+ *            -> 左转90 -> 段4 直行 -> 右转90 -> 段5 直行 -> 右转90
+ *
+ * ★ 时长是 50RPM 直行实测值, 改 IR_SPEED_RPM 必须重测。
+ *   转向不需要填时长, 它靠陀螺仪闭环转到角度为止。 */
 static const IrPathSeg_t k_auto_path[] =
 {
-    { IR_MOVE_FWD,   3300u },
-    { IR_MOVE_LEFT,  3800u },
-    { IR_MOVE_FWD,   4800u },
-    { IR_MOVE_LEFT,  4400u },
-    { IR_MOVE_FWD,   4900u }
+    { IR_MOVE_FWD,      3300u },
+    { IR_MOVE_TURN_L,   0u    },     /* 段1 之后: 左转 90 */
+    { IR_MOVE_FWD,      3800u },
+    { IR_MOVE_TURN_R,   0u    },     /* 段2 之后: 右转 90 */
+    { IR_MOVE_FWD,      4800u },
+    { IR_MOVE_TURN_L,   0u    },     /* 段3 之后: 左转 90 */
+    { IR_MOVE_FWD,      4400u },
+    { IR_MOVE_TURN_R,   0u    },     /* 段4 之后: 右转 90 */
+    { IR_MOVE_FWD,      4900u },
+    { IR_MOVE_TURN_R,   0u    }      /* 段5 之后: 右转 90 */
 };
 
 #define IR_AUTO_SEG_NUM ((uint8_t)(sizeof(k_auto_path) / sizeof(k_auto_path[0])))
@@ -105,6 +155,16 @@ static uint16_t          s_single_ms = 2000u;
 static uint8_t           s_running = 0u;
 static uint8_t           s_cancel = 0u;
 
+/* 自动跑图的"基准航向": 第 1 段起跑瞬间的航向。
+ * 后面每一段都用它当目标, 而不是用"本段起跑时的当前航向" ——
+ * 否则上一段偏掉多少度, 下一段就把那个歪着的方向当成正前方,
+ * 误差会逐段累积, 跑完 5 段车头可以偏几十度。 */
+static float             s_home_yaw = 0.0f;
+
+/* 转向段的目标角度(绝对航向, 度)。
+ * 由 ir_load_segment() 在倒计时阶段算好, IR_TURNING 里闭环收敛到它。 */
+static float             s_turn_target = 0.0f;
+
 /* ZERO / STOPPING 这两个"一次性动作"的进度标志 */
 static uint8_t           s_action_pushed = 0u;
 static uint8_t           s_settle_armed = 0u;
@@ -122,6 +182,11 @@ static uint8_t           s_position_valid[IR_MOTOR_NUM];
 
 static const char       *s_status = "READY";
 static const char       *s_result = "NONE";
+
+/* 读编码器失败的那台电机(1~4), 0 = 没有。
+ * 挂在 IR_ZERO / IR_COUNTDOWN 的状态名上: POS ERR 之后按 PE0 重启,
+ * 会先走 ZERO -> 1s 倒计时, 这段时间足够在屏幕上看到是哪一号读不到。 */
+static uint8_t           s_pos_fail_motor = 0u;
 
 /* ==================== 小工具 ==================== */
 
@@ -168,7 +233,11 @@ static void ir_abort(const char *reason)
     s_result = reason;
 }
 
-/* 按当前段的方向, 带着航向修正下发一帧麦轮速度。
+/* 按当前段的方向下发一帧麦轮速度。
+ *
+ * 直行/横移/后退: 平移速度 + 航向修正叠加。
+ * 原地转向: 只发自转分量, 转多少由航向环的误差决定(见 ir_apply_turn)。
+ *
  * 惯导跑图永远是闭环的: 没有陀螺仪数据时启动会被拒绝,
  * 运行中掉线会立刻停车, 所以这里不需要"开环"分支。 */
 static void ir_apply_move(void)
@@ -197,7 +266,44 @@ static void ir_apply_move(void)
     }
 }
 
-/* 把当前段号对应的动作/时长装进 s_cur_move / s_cur_ms */
+/**
+  * @brief  判断当前段是不是"原地转向"
+  */
+static uint8_t ir_is_turn_seg(uint8_t move)
+{
+    return ((move == (uint8_t)IR_MOVE_TURN_L)
+            || (move == (uint8_t)IR_MOVE_TURN_R)) ? 1u : 0u;
+}
+
+/**
+  * @brief  下发一帧纯自转命令
+  * @note   转向角速度按剩余误差限幅: 差得多就快转, 快到位就慢转,
+  *         避免以 40RPM 冲过目标再掉头来回摆。
+  */
+static void ir_apply_turn(void)
+{
+    float remain = g_yaw_target - jy901s_data.yaw_continuous;
+    int16_t rpm;
+
+    /* 误差 10 度以上给满转, 5 度时减半, 1.5 度以内用最低转(能压过静摩擦) */
+    if (remain > 10.0f)       rpm = IR_TURN_RPM;
+    else if (remain < -10.0f) rpm = -IR_TURN_RPM;
+    else
+    {
+        float gain = (float)IR_TURN_RPM / 10.0f;
+        float cmd  = remain * gain;
+
+        if ((cmd < 8.0f) && (cmd > 0.0f))   cmd = 8.0f;
+        if ((cmd > -8.0f) && (cmd < 0.0f))  cmd = -8.0f;
+
+        rpm = (int16_t)((cmd >= 0.0f) ? (cmd + 0.5f) : (cmd - 0.5f));
+    }
+
+    Car_Mecanum(0, 0, rpm);
+}
+
+/* 把当前段号对应的动作/时长装进 s_cur_move / s_cur_ms,
+ * 并为"转向段"算好目标角度。 */
 static void ir_load_segment(void)
 {
     if (s_mode == IR_MODE_SINGLE)
@@ -214,6 +320,18 @@ static void ir_load_segment(void)
 
     s_cur_move = k_auto_path[s_index].move;
     s_cur_ms = k_auto_path[s_index].duration_ms;
+
+    /* 转向段: 目标角 = 转向开始那一刻的航向 ± 90 度。
+     * ★ 必须在真正开始转之前采样, 所以这里用"当前航向"而不是 s_home_yaw;
+     *   转向完成后 s_home_yaw 会被同步更新成转完的朝向(见 ir_verify),
+     *   下一段直行才不会把车头拧回去。 */
+    if (ir_is_turn_seg(s_cur_move) != 0u)
+    {
+        float delta = (s_cur_move == (uint8_t)IR_MOVE_TURN_L) ? 90.0f : -90.0f;
+
+        s_turn_target = jy901s_data.yaw_continuous + delta;
+        s_cur_ms      = IR_TURN_TIMEOUT_MS;   /* 这一段用超时当上限 */
+    }
 }
 
 /* 结束运动, 进入停车流程 */
@@ -248,6 +366,7 @@ static uint8_t ir_read_positions(void)
         if (s_position_valid[i] == 0u)
         {
             all_ok = 0u;
+            s_pos_fail_motor = (uint8_t)(i + 1u);
         }
     }
 
@@ -275,16 +394,17 @@ static void ir_verify(uint32_t now)
 
         if (s_verify_reliable == 0u)
         {
-            /* 读不到位置就没法确认停车。补发一次停止命令再试,
-             * 连续失败就整体报错停机 —— 带着"不知道轮子停没停"的
-             * 状态跑下一段是最危险的。 */
+            /* 读不到位置就没法确认停车。★ 这里不能重发停车命令:
+             * Car_Stop() 一次就塞 8 帧, 而现在失败的原因恰恰是队列里
+             * 积压着上一拍的速度帧 + 刚才那 8 帧停车帧, 再塞 8 帧只会
+             * 让队列更满、下次读位置更容易超时 —— 越重试越堵。
+             * 停车帧已经发过 2 轮(幂等), 这里只需等队列排空再读一次。 */
             s_verify_retry++;
             if (s_verify_retry > IR_VERIFY_MAX_RETRY)
             {
                 ir_abort("POS ERR");
                 return;
             }
-            Car_Stop();
             s_settle_armed = 0u;
             s_state = IR_STOPPING;
             s_status = "POS RETRY";
@@ -308,6 +428,7 @@ static void ir_verify(uint32_t now)
         if (Car_ReadPositionCount((uint8_t)(i + 1u), &pos_now) == 0u)
         {
             s_verify_reliable = 0u;
+            s_pos_fail_motor = (uint8_t)(i + 1u);
             continue;
         }
 
@@ -323,13 +444,14 @@ static void ir_verify(uint32_t now)
 
     if (s_verify_reliable == 0u)
     {
+        /* 同上: 阶段二失败也不补发停车帧, 只等队列排空再读。
+         * 补发的唯一作用是把队列重新塞满。 */
         s_verify_retry++;
         if (s_verify_retry > IR_VERIFY_MAX_RETRY)
         {
             ir_abort("POS ERR");
             return;
         }
-        Car_Stop();
         s_verify_phase = IR_VERIFY_WAIT;
         s_settle_armed = 0u;
         s_state = IR_STOPPING;
@@ -383,6 +505,14 @@ static void ir_verify(uint32_t now)
     s_verify_retry = 0u;
     s_status = "STOPPED";
 
+    /* 转向段结束后, 基准航向要跟着更新成新的车头朝向。
+     * 否则下一段直行时会用转弯前的 s_home_yaw 当目标, 一开跑就
+     * 把车头硬拧回原来的方向。 */
+    if (ir_is_turn_seg(s_cur_move) != 0u)
+    {
+        s_home_yaw = jy901s_data.yaw_continuous;
+    }
+
     /* 最后一段: 直接收尾, 不清零位置 —— 那组 S_CPOS 就是这一段的位移 */
     if ((uint8_t)(s_index + 1u) >= s_total)
     {
@@ -419,6 +549,7 @@ void InertialRun_Init(void)
     s_verify_retry = 0u;
     s_verify_reliable = 1u;
     s_stuck_mask = 0u;
+    s_pos_fail_motor = 0u;
     s_deadline = 0u;
     s_start_tick = 0u;
     s_next_steer_tick = 0u;
@@ -464,6 +595,10 @@ static uint8_t ir_start(uint8_t mode, uint8_t total)
     s_verify_retry = 0u;
     s_stuck_mask = 0u;
 
+    /* 基准航向等第 1 段真正起跑时再采样(那时车已经摆好、IMU 数据也稳),
+     * 这里只清掉上一趟留下的值, 避免误用。 */
+    s_home_yaw = 0.0f;
+
     YawLoop_Disable();
 
     for (i = 0u; i < IR_MOTOR_NUM; i++)
@@ -488,7 +623,9 @@ uint8_t InertialRun_StartAuto(void)
 
 uint8_t InertialRun_StartSingle(InertialMove_t move, uint16_t duration_ms)
 {
-    if ((uint8_t)move >= (uint8_t)IR_MOVE_COUNT)
+    /* 单段调试只允许四个平移方向; 转向动作需要固定 90 度目标,
+     * 不在手工调试范围内, 传进来就退回直行。 */
+    if ((uint8_t)move >= IR_SINGLE_MOVE_COUNT)
     {
         move = IR_MOVE_FWD;
     }
@@ -518,6 +655,7 @@ void InertialRun_Cancel(void)
     switch (s_state)
     {
         case IR_MOVING:
+        case IR_TURNING:
             s_cancel = 1u;
             ir_begin_stop("USER STOP");
             break;
@@ -586,7 +724,20 @@ void InertialRun_Task(void)
             ir_load_segment();
             s_state = IR_COUNTDOWN;
             s_deadline = now + IR_LEAD_MS;
-            s_status = "READY";
+
+            /* 上一次 POS ERR 是哪一号读不到, 借这段清零/倒计时显示出来,
+             * 下次再失败就能直接定位到电机和接线。 */
+            if (s_pos_fail_motor != 0u)
+            {
+                s_status = (s_pos_fail_motor == 1u) ? "ZERO! M1"
+                         : (s_pos_fail_motor == 2u) ? "ZERO! M2"
+                         : (s_pos_fail_motor == 3u) ? "ZERO! M3"
+                         : "ZERO! M4";
+            }
+            else
+            {
+                s_status = "READY";
+            }
             break;
 
         /* ---- 起跑 ---- */
@@ -610,9 +761,36 @@ void InertialRun_Task(void)
                 break;
             }
 
-            /* 目标航向 = 本段起跑瞬间的当前航向。
-             * 每段都是独立地"保持朝这个方向走", 上一段的漂移不会被带进下一段。 */
-            YawLoop_Enable(jy901s_data.yaw_continuous, IR_TURN_MAX);
+            /* 目标航向的基准:
+             *   - 第 1 段(countdown 时 s_index == 0 且当前段是直行)采一次基;
+             *   - 之后的直行段沿用 s_home_yaw, 它会在转向段结束后被更新成
+             *     新的车头朝向(见 ir_verify), 所以每段直行都是"朝着当前
+             *     车头方向走", 而不会把车头硬拧回起点朝向。
+             *
+             * 单段调试(s_index 恒为 0)行为不变: 每次起跑都重新定基准。 */
+            if ((s_index == 0u) && (ir_is_turn_seg(s_cur_move) == 0u))
+            {
+                s_home_yaw = jy901s_data.yaw_continuous;
+            }
+
+            /* ---- 转向段: 完全不同的下发方式 ---- */
+            if (ir_is_turn_seg(s_cur_move) != 0u)
+            {
+                /* 目标角就是本段的绝对航向, 直接闭环过去。
+                 * 这里不能用 s_home_yaw: 转向的目的就是离开当前朝向。 */
+                YawLoop_Enable(s_turn_target, IR_TURN_MAX);
+
+                ir_apply_turn();
+
+                s_running = 1u;
+                s_start_tick = now;
+                s_next_steer_tick = now + IR_STEER_MS;
+                s_status = "TURN";
+                s_state = IR_TURNING;
+                break;
+            }
+
+            YawLoop_Enable(s_home_yaw, IR_TURN_MAX);
 
             ir_apply_move();
 
@@ -623,7 +801,7 @@ void InertialRun_Task(void)
             s_state = IR_MOVING;
             break;
 
-        /* ---- 运行中 ---- */
+        /* ---- 直行/横移中 ---- */
         case IR_MOVING:
             if (s_running == 0u)
             {
@@ -648,6 +826,42 @@ void InertialRun_Task(void)
             {
                 s_next_steer_tick = now + IR_STEER_MS;
                 ir_apply_move();
+            }
+            break;
+
+        /* ---- 原地转向中 ---- */
+        case IR_TURNING:
+            if (s_running == 0u)
+            {
+                break;
+            }
+
+            if (YawLoop_IsImuAlive() == 0)
+            {
+                ir_begin_stop("IMU LOST");
+                break;
+            }
+
+            /* 到位判据: 剩余角度进容差带就算转完。
+             * 只判一个方向(转过目标也算到位), 否则会绕着目标来回摆。 */
+            if ((s_turn_target - jy901s_data.yaw_continuous) <= IR_TURN_TOL_DEG
+                && (s_turn_target - jy901s_data.yaw_continuous) >= -IR_TURN_TOL_DEG)
+            {
+                ir_begin_stop("TURNED");
+                break;
+            }
+
+            /* 超时保护: 被卡住或陀螺仪不跟时不能一直原地转 */
+            if ((uint32_t)(now - s_start_tick) >= (uint32_t)s_cur_ms)
+            {
+                ir_begin_stop("TURN TO");
+                break;
+            }
+
+            if ((int32_t)(now - s_next_steer_tick) >= 0)
+            {
+                s_next_steer_tick = now + IR_STEER_MS;
+                ir_apply_turn();
             }
             break;
 
@@ -716,6 +930,9 @@ void InertialRun_GetInfo(IrInfo_t *info)
     info->running = s_running;
     info->duration_ms = s_cur_ms;
     info->elapsed_ms = (s_running != 0u) ? (HAL_GetTick() - s_start_tick) : 0u;
+    info->turn_remain_deg = (s_state == IR_TURNING)
+                          ? (s_turn_target - jy901s_data.yaw_continuous)
+                          : 0.0f;
     info->status = s_status;
     info->result = s_result;
 
@@ -730,7 +947,7 @@ const char *InertialRun_StateName(IrState_t state)
 {
     static const char *const names[] =
     {
-        "IDLE", "ZERO", "WAIT", "RUN", "STOP", "VERIFY"
+        "IDLE", "ZERO", "WAIT", "RUN", "TURN", "STOP", "VERIFY"
     };
 
     if ((uint8_t)state >= (uint8_t)(sizeof(names) / sizeof(names[0])))
@@ -745,7 +962,7 @@ const char *InertialRun_MoveName(uint8_t move)
 {
     static const char *const names[] =
     {
-        "FWD", "LEFT", "RIGHT", "BACK"
+        "FWD", "LEFT", "RIGHT", "BACK", "TURN_L", "TURN_R"
     };
 
     if (move >= (uint8_t)(sizeof(names) / sizeof(names[0])))

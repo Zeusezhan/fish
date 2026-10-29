@@ -66,7 +66,9 @@ uint8_t Car_SetEnabled(uint8_t enabled);
 
 /* 【读位置】读某台的 S_CPOS 脉冲计数。
  * 内部会先把队列里已有的帧全部发完再收应答, 因此会阻塞,
- * 但有 CAR_POS_TOTAL_MS 的总超时预算。返回 1 = 读到有效值。 */
+ * 但有 CAR_POS_FLUSH_MS(排队) + CAR_POS_TOTAL_MS(收应答) 两段超时预算,
+ * 且超时/坏帧会自动重发查询帧(CAR_POS_QUERY_RETRY 次)。
+ * 返回 1 = 读到有效值。 */
 uint8_t Car_ReadPositionCount(uint8_t motor_id, int32_t *position);
 
 /* 【清零位置】1~4 号的 S_CPOS 全部清零, 返回 1 表示全部入队成功。 */
@@ -85,7 +87,9 @@ uint8_t Car_TxBusy(void);
  * 必须确定"命令已经发完"的场合使用。 */
 uint8_t Car_TxFlush(uint32_t timeout_ms);
 
-/* 【诊断】取走并清零"发送异常"计数(队列满 / DMA 启动失败)。
+/* 【诊断】取走并清零"发送异常"计数。
+ * 统计的是: 队列满被迫丢帧、DMA 启动失败、以及任何一帧"立即停止"
+ * 没能送达(停止帧丢不起, 其余速度命令下一拍会重发, 不计入)。
  * 这个数一直涨说明发送侧有问题, 而不是控制算法。 */
 uint32_t Car_TakeTxErrors(void);
 

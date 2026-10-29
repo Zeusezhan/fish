@@ -39,13 +39,13 @@
  *
  * ★ 9600bps 下的带宽核算(无线蓝牙模块固定 9600, 不能改):
  *     可用吞吐 = 9600 / 10 = 960 字节/秒
- *     一帧 5 通道约 32 字节 => 单帧占用约 33ms
- *       周期 40ms : 占用 83%  -> 过载, 会丢帧, 参数下发也容易失败
- *       周期 60ms : 占用 56%  -> 推荐, 波形连续且给下行命令留出余量
- *       周期 80ms : 占用 42%  -> 更稳, 但波形刷新略慢
+ *     一帧 6 通道约 40 字节 => 单帧占用约 42ms
+ *       周期 60ms : 占用 70%  -> 下行命令余量不足, 滑块容易失效
+ *       周期 90ms : 占用 47%  -> 当前取值, 波形连续且留足下行余量
+ *       周期 120ms: 占用 35%  -> 更稳, 但波形刷新略慢
  *   若调参时发现波形掉点、或 VOFA+ 发的 "P6.0" 不生效,
  *   优先把这里调大到 80u。 */
-#define WIRELESS_REPORT_PERIOD_MS   (60u)
+#define WIRELESS_REPORT_PERIOD_MS   (90u)
 
 /**
   * @brief  初始化无线串口上报模块
@@ -70,12 +70,13 @@ void Wireless_StartReceive(void);
   *           不会占用 CPU 等待, 所以可以放心在中断里调用。
   *         内部带周期限频, 比 WIRELESS_REPORT_PERIOD_MS 更密的调用
   *         会被自动跳过, 所以直接无脑调用即可。
-  *         帧格式(VOFA+ FireWater): "目标,当前,Kp,Kd,误差\n"
+  *         帧格式(VOFA+ FireWater): "目标,当前,Kp,Kd,误差,输出\n"
   *           CH0 = 目标航向
   *           CH1 = 当前航向
   *           CH2 = 当前 Kp(确认滑块生效)
   *           CH3 = 当前 Kd
   *           CH4 = 航向误差(目标-当前), 调 PD 主要看这条
+  *           CH5 = 航向环输出修正量(RPM), 判断闭环是否真的在起作用
   */
 void Wireless_SendYaw(float target_yaw_deg, float current_yaw_deg);
 
@@ -83,25 +84,29 @@ void Wireless_SendYaw(float target_yaw_deg, float current_yaw_deg);
   * @brief  上报航向误差(度) = 目标角 - 当前角
   * @param  target_yaw_deg   目标航向角(度)
   * @param  current_yaw_deg  当前陀螺仪航向角(度)
-  * @note   内部与 Wireless_SendYaw 相同: 每帧发 4 个通道
-  *         (目标/当前/Kp/Kd), 两角之差在 VOFA+ 里用两根曲线的差
-  *         就能看出来。
+  * @note   内部与 Wireless_SendYaw 相同: 每帧发 6 个通道
+  *         (目标/当前/Kp/Kd/误差/输出), 两角之差在 VOFA+ 里用
+  *         两根曲线的差就能看出来。
   */
 void Wireless_SendYawError(float target_yaw_deg, float current_yaw_deg);
 
 /**
-  * @brief  按当前实际状态上报(目标航向 + 当前航向 + Kp + Kd)
-  * @note   四个值都取自全局变量:
+  * @brief  按当前实际状态上报(目标 + 当前 + Kp + Kd + 误差 + 输出)
+  * @note   所有值都取自全局变量:
   *             目标  = g_yaw_target
   *             当前  = jy901s_data.yaw_continuous
   *             Kp    = g_yaw_kp
   *             Kd    = g_yaw_kd
+  *             误差  = 目标 - 当前
+  *             输出  = g_yaw_output (RPM 执行量)
   *         已经算好帧内容并做了周期限频, 可以贴到主循环里反复调用,
   *         不会刷爆串口。
   *         ★ 上报不受闭环开关影响: 即使 g_yaw_loop_enable = 0,
   *           只要没到达上传周期就会照常发, 方便上电先验证 IMU 和接线。
   *         由于回传了 Kp/Kd, 在 VOFA+ 里拖动滑块后能立刻看到
   *         对应通道的数值变化 —— 这就是"参数已发送成功"的确认。
+  *         ★ CH5(输出)即使闭环关着也照常发 0, 正好用来确认
+  *           "没修正"到底是因为闭环没开, 还是因为算出来被限幅。
   */
 void Wireless_ReportYaw(void);
 

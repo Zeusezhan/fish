@@ -9,9 +9,14 @@
  *   4. 周期性启动 DMA 前必须等上一次发完, 否则返回 HAL_BUSY 丢帧。
  *
  * 【帧格式】(上行: 芯片 -> PC)
- *       "12.34,-5.60,4.00,0.35\n"
- *         ^通道0   ^通道1   ^通道2  ^通道3
- *         目标角   当前角    Kp      Kd
+ *       "12.34,-5.60,4.00,0.35,-17.94,12.60\n"
+ *         ^ch0    ^ch1   ^ch2  ^ch3   ^ch4   ^ch5
+ *         目标角  当前角   Kp    Kd    误差   输出(RPM)
+ *
+ *   ch5 = 航向环输出 g_yaw_output, 是排查"看不到闭环修正"的关键:
+ *         恒 0     -> 闭环没使能 / IMU 一直读失败
+ *         恒 ±30   -> 撞限幅(IR_TURN_MAX), PID 正常但推力不够
+ *         有正负变化 -> PID 正常且已下发, 车不修就是电机映射问题
  * 【下行格式】(PC -> 芯片, 在线调 PI-D)
  *       "kp,kd\n"     例如 "6.0,0.4\n"    (数据发送框手打, 两个一起设)
  *       "kp,ki,kd\n"  例如 "6.0,0.3,0.4\n" (三个一起设)
@@ -27,23 +32,35 @@ extern volatile float g_yaw_target;
 extern volatile float g_yaw_kp;
 extern volatile float g_yaw_ki;
 extern volatile float g_yaw_kd;
+
+/* 航向环每拍算出的修正量(RPM)。这是判断"PID 到底有没有在下发"的唯一
+ * 直接证据: 它恒为 0 -> 闭环没开; 恒为 ±限幅 -> 输出饱和;
+ * 有变化但车不动 -> 问题在电机映射, 不在 PID。 */
+extern volatile float g_yaw_output;
 #include "usart.h"
 #include "jy901s.h"
 
 /* ---- 上报通道数:
- *   0 = 目标航向, 1 = 当前航向, 2 = 当前 Kp, 3 = 当前 Kd, 4 = 航向误差
+ *   0 = 目标航向, 1 = 当前航向, 2 = 当前 Kp, 3 = 当前 Kd,
+ *   4 = 航向误差, 5 = **航向环输出 g_yaw_output(RPM)**
  *
  * 为什么要有误差通道: 调 PD 时最关心的是"误差收敛得快不快、有没有
  * 来回摆", 直接看误差曲线比看两条几乎重合的角度曲线直观得多。
  *
+ * 为什么要有第 5 通道(输出量): 只误差和角度这两类信号, 没法区分
+ * "PID 没在算" 和 "算了但没送到轮子上"。把执行量打出来就能一眼判定:
+ *   - 恒 0        -> g_yaw_loop_enable = 0 或 IMU 读取一直失败
+ *   - 恒 ±30      -> 输出饱和, 该调大 IR_TURN_MAX
+ *   - 有正负变化  -> PID 正常, 车不修就是 Car_Mecanum 的 omega 映射问题
+ *
  * 说明: 目标/当前/Kp/Kd 之外再单独发误差, 是为了在 VOFA+ 里能
  * 把误差单独放大显示; 误差 = 目标 - 当前, 也可以在 VOFA+ 里用
  * 表达式算, 但占用一个通道更省事。 */
-#define WIRELESS_CHANNELS       (5u)
+#define WIRELESS_CHANNELS       (6u)
 
 /* ---- 单帧最大字节数 ----
- * 5 个浮点数(各最多约 8 字节) + 逗号 + 结束符, 64 字节绰绰有余 */
-#define WIRELESS_FRAME_MAX      (64u)
+ * 6 个浮点数(各最多约 8 字节) + 逗号 + 结束符, 80 字节留足余量 */
+#define WIRELESS_FRAME_MAX      (80u)
 
 /* ---- 下行(PC -> 芯片)命令缓冲 ----
  * 协议: "kp,kd\n", 例如 "6.0,0.4"。32 字节足够, 多出来的直接丢弃。 */
@@ -423,14 +440,19 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 }
 
 /**
-  * @brief  上报"目标航向 + 当前航向"(供定时器中断回调调用)
+  * @brief  上报"目标航向 + 当前航向"(供主循环调用)
+  * @note   实际发出的是 6 个通道, 另外 4 个(Kp/Kd/误差/输出)在这里
+  *         直接取自全局变量, 见 wireless_uart.h 的通道说明。
   */
 void Wireless_SendYaw(float target_yaw_deg, float current_yaw_deg)
 {
     uint32_t now = HAL_GetTick();
     uint8_t  pos = 0u;
 
-    /* ---- 限频: 没到上报周期就直接返回, 中断尽量短 ---- */
+    /* ---- 限频: 没到上报周期就直接返回, 中断尽量短 ----
+     * 一次发 6 个通道、约 40 字节: 9600bps 下要占 42ms,
+     * 60ms 周期剩不到 20ms 给下行命令, 拖滑块时容易丢命令。
+     * 周期已调到 90ms, 留出余量, 波形仍然连续。 */
     if ((now - s_last_report_tick) < WIRELESS_REPORT_PERIOD_MS)
     {
         return;
@@ -447,9 +469,7 @@ void Wireless_SendYaw(float target_yaw_deg, float current_yaw_deg)
 
     s_last_report_tick = now;
 
-    /* ---- 组帧: "目标,当前,Kp,Kd,误差\n" ----
-     * 把当前 Kp/Kd 也回传, 拖动滑块后能立刻在波形上看到参数有没有生效;
-     * 误差通道用来观察收敛速度和是否来回摆。 */
+    /* ---- 组帧: "目标,当前,Kp,Kd,误差,输出\n" ---- */
     wireless_append_float((char *)s_tx_buf, &pos, target_yaw_deg, WIRELESS_DECIMALS);
     s_tx_buf[pos++] = ',';
     wireless_append_float((char *)s_tx_buf, &pos, current_yaw_deg, WIRELESS_DECIMALS);
@@ -460,6 +480,10 @@ void Wireless_SendYaw(float target_yaw_deg, float current_yaw_deg)
     s_tx_buf[pos++] = ',';
     wireless_append_float((char *)s_tx_buf, &pos,
                           target_yaw_deg - current_yaw_deg, WIRELESS_DECIMALS);
+    s_tx_buf[pos++] = ',';
+    /* 第 5 通道: 航向环执行量(RPM)。限幅后取绝对值 <= 30,
+     * 2 位小数足够看清它是不是在动、有没有顶到上限。 */
+    wireless_append_float((char *)s_tx_buf, &pos, g_yaw_output, WIRELESS_DECIMALS);
     s_tx_buf[pos++] = WIRELESS_FRAME_END;
 
     /* ---- 非阻塞发送, 立刻返回 ---- */
@@ -475,7 +499,8 @@ void Wireless_SendYawError(float target_yaw_deg, float current_yaw_deg)
 }
 
 /**
-  * @brief  按当前实际状态上报(目标航向 + 当前航向)
+  * @brief  按当前实际状态上报
+  * @note   6 个通道: 目标 / 当前 / Kp / Kd / 误差 / 航向环输出(RPM)
   */
 void Wireless_ReportYaw(void)
 {
