@@ -66,11 +66,24 @@ void Error_Handler(void);
  *   所以 InertialRun 里"保持航向"其实一直没生效。
  */
 
+/* ---- 航向修正量的总限幅(RPM), 全工程唯一定义点 ----
+ *
+ * main.c 上电使能时用; InertialRun 每段 YawLoop_Enable() 也传它。
+ * 原来 main.c 的 YAW_OUT_MAX_DEFAULT 和 InertialRun.c 的 IR_TURN_MAX
+ * 是同一个 30, 分两处容易出现"改了一个没反应"的问题, 现合并到这里。
+ * 50RPM 直行配 ±30RPM 修正 -> 轮速落在 20~80, 既有纠偏能力又不甩尾。 */
+#define YAW_OUT_MAX_RPM         (30.0f)
+
 /* 使能航向环: target_deg 目标航向(度), out_max_rpm 自转修正量限幅(RPM) */
 void  YawLoop_Enable(float target_deg, float out_max_rpm);
 
 /* 关闭航向环(输出清零, IMU 仍在中断里继续读) */
 void  YawLoop_Disable(void);
+
+/* 只改目标角, 不动使能/限幅/积分。
+ * 给"横向位置外环"用: 外环每 20ms 把理想航向加一个横偏补偿量再下发,
+ * 所以不能走 YawLoop_Enable —— 那会把积分一起清掉。 */
+void  YawLoop_SetTarget(float target_deg);
 
 /* 陀螺仪是否还在正常出数: 1 = 正常, 0 = 掉线(运行中必须停车) */
 int8_t YawLoop_IsImuAlive(void);

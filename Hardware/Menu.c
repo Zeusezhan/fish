@@ -109,6 +109,14 @@ static uint32_t   s_feedback_tick = 0u;
 
 /* ==================== 绘制 ==================== */
 
+/* 当前单段动作是不是原地转向。转向段的目标角由陀螺仪闭环决定,
+ * 时长不起作用, 界面上要区别对待(不显示秒数、不响应加减时长)。 */
+static uint8_t menu_move_is_turn(uint8_t move)
+{
+    return ((move == (uint8_t)IR_MOVE_TURN_L)
+            || (move == (uint8_t)IR_MOVE_TURN_R)) ? 1u : 0u;
+}
+
 static void menu_draw_positions(const IrInfo_t *info)
 {
     char line[22];
@@ -192,18 +200,27 @@ static void menu_draw_run_head(const IrInfo_t *info, uint8_t single)
 
     if (single != 0u)
     {
+        uint8_t move = (info->running != 0u) ? info->move : s_single_move;
+
         /* ★ 空闲时显示的是"界面正在编辑的设定值", 不是状态机快照。
          *   IrInfo_t 里的 move/duration_ms 是"本次跑图的实际值", 空闲时
          *   还停在上一次运行的结果上, 跟着它画的话按键改了也看不出来。
          *   运行中才用快照(那才是真的在下发的值)。 */
-        const char *name = (info->running != 0u)
-                         ? InertialRun_MoveName(info->move)
-                         : InertialRun_MoveName(s_single_move);
-        double sec = (info->running != 0u)
-                   ? ((double)info->duration_ms / 1000.0)
-                   : ((double)s_single_ms / 1000.0);
+        const char *name = InertialRun_MoveName(move);
 
-        (void)snprintf(line, sizeof(line), "SINGLE %s %.1fs", name, sec);
+        if (menu_move_is_turn(move) != 0u)
+        {
+            /* 转向段按角度闭环, 时长只是超时上限, 显示出来会误导 */
+            (void)snprintf(line, sizeof(line), "SINGLE %s 90deg", name);
+        }
+        else
+        {
+            double sec = (info->running != 0u)
+                       ? ((double)info->duration_ms / 1000.0)
+                       : ((double)s_single_ms / 1000.0);
+
+            (void)snprintf(line, sizeof(line), "SINGLE %s %.1fs", name, sec);
+        }
     }
     else
     {
@@ -214,7 +231,15 @@ static void menu_draw_run_head(const IrInfo_t *info, uint8_t single)
     }
     OLED_ShowString(0, 0, line);
 
-    if (info->running != 0u)
+    if ((info->running != 0u) && (info->state == IR_TURNING))
+    {
+        /* 转向中: 剩余角度比剩余时间有用得多 —— 转向是闭环到角度,
+         * 时间只用来判断"是不是卡住了" */
+        (void)snprintf(line, sizeof(line), "REM:%5.1f Y:%5.1f",
+                       (double)info->turn_remain_deg,
+                       (double)jy901s_data.yaw);
+    }
+    else if (info->running != 0u)
     {
         /* 剩余时间 + 当前航向误差, 调 Kp/Ki 看这一行最直观 */
         uint32_t remain = (info->elapsed_ms < info->duration_ms)
@@ -227,10 +252,19 @@ static void menu_draw_run_head(const IrInfo_t *info, uint8_t single)
     }
     else if (single != 0u)
     {
-        /* 空闲: 和上面第 0 行同源, 显示界面设定值 + 陀螺仪实时航向 */
-        (void)snprintf(line, sizeof(line), "TOTAL %.1fs Y:%5.1f",
-                       (double)s_single_ms / 1000.0,
-                       (double)jy901s_data.yaw);
+        /* 空闲: 和上面第 0 行同源, 显示界面设定值 + 陀螺仪实时航向。
+         * 转向动作没有可调的时长, 换成目标角度 + 实时航向。 */
+        if (menu_move_is_turn(s_single_move) != 0u)
+        {
+            (void)snprintf(line, sizeof(line), "GOAL 90deg  Y:%5.1f",
+                           (double)jy901s_data.yaw);
+        }
+        else
+        {
+            (void)snprintf(line, sizeof(line), "TOTAL %.1fs Y:%5.1f",
+                           (double)s_single_ms / 1000.0,
+                           (double)jy901s_data.yaw);
+        }
     }
     else
     {
@@ -267,7 +301,8 @@ static void menu_draw_auto(void)
 /* 单段页第 7 行的按键说明。
  * 反馈期间整行替换成醒目的短标记, 让人确认"这次按键真的生效了":
  *   加时长 -> "[UP] +0.1s"      减时长 -> "[DN] -0.1s"
- *   切步进 -> "STEP 0.1s"       其余时候显示常驻按键说明。
+ *   切步进 -> "STEP 0.1s"       换动作 -> "DIR TURN_L"
+ *   其余时候显示常驻按键说明(转向动作的说明不同, 见下)。
  * 最终设定值本身在第 0 行(方向 + 秒数)和第 1 行(TOTAL)同时更新,
  * 所以这里不需要重复数字, 只负责"这次按键被接收了"的即时反馈。 */
 static void menu_draw_single_hint(void)
@@ -294,8 +329,18 @@ static void menu_draw_single_hint(void)
                            (unsigned)((s_single_step % 1000u) / 100u));
             break;
 
+        case MENU_FB_DIR:
+            /* 换动作没有数字可报, 直接把当前动作名打出来 */
+            (void)snprintf(line, sizeof(line), "DIR %s",
+                           InertialRun_MoveName(s_single_move));
+            break;
+
         default:
-            (void)snprintf(line, sizeof(line), "1:+ 2:- 0:DIR");
+            /* 转向动作没有时长可调, 常驻说明换成"0 短按正向 / 1 长按反向" */
+            (void)snprintf(line, sizeof(line),
+                           (menu_move_is_turn(s_single_move) != 0u)
+                           ? "0:DIR 1H:REV"
+                           : "1:+ 2:- 0:DIR");
             break;
     }
 
@@ -493,18 +538,19 @@ static void menu_keys_single(uint8_t press, uint8_t release)
 {
     uint8_t busy = InertialRun_IsBusy();
 
-    /* PE1 短按(按下即生效): 按当前步进加时长 */
+    /* PE1 短按(按下即生效): 按当前步进加时长。
+     * 转向动作的时长由陀螺仪闭环决定, 加减没有意义, 直接忽略。 */
     if (press == KEY_2)
     {
-        if (busy == 0u)
+        if ((busy == 0u) && (menu_move_is_turn(s_single_move) == 0u))
         {
             (void)menu_single_add_ms();
             menu_feedback(MENU_FB_TIME_UP);
         }
     }
 
-    /* PE1 长按: 切换时长步进 0.1s <-> 1.0s */
-    if (menu_long_pe1() != 0u)
+    /* PE1 长按: 切换时长步进 0.1s <-> 1.0s(转向动作没有时长, 不切) */
+    if ((menu_long_pe1() != 0u) && (menu_move_is_turn(s_single_move) == 0u))
     {
         if (busy == 0u)
         {
@@ -520,10 +566,10 @@ static void menu_keys_single(uint8_t press, uint8_t release)
         s_long_fired_pe1 = 0u;
     }
 
-    /* PE2 短按(按下即生效): 按当前步进减时长 */
+    /* PE2 短按(按下即生效): 按当前步进减时长(转向动作忽略) */
     if (press == KEY_3)
     {
-        if (busy == 0u)
+        if ((busy == 0u) && (menu_move_is_turn(s_single_move) == 0u))
         {
             (void)menu_single_sub_ms();
             menu_feedback(MENU_FB_TIME_DOWN);
@@ -543,6 +589,19 @@ static void menu_keys_single(uint8_t press, uint8_t release)
     if (release == KEY_3)
     {
         s_long_fired = 0u;
+    }
+
+    /* PE1 长按(转向动作下不切步进): 逆序换动作。
+     * 按键说明里的 "1:+ 2:- 0:DIR" 只讲得下 3 个键, 这里借 PE1 长按补
+     * 一个反向, 免得 4 个动作只能一个方向轮回。
+     * 用 Key_GetHoldMs 判断而不是 menu_long_pe1(): 后者由前面的步进切换
+     * 代码消耗, 同一个长按只会在那一次返回 1。 */
+    if ((press == KEY_2) && (s_long_fired_pe1 != 0u)
+        && (busy == 0u) && (menu_move_is_turn(s_single_move) != 0u))
+    {
+        s_single_move = (uint8_t)((s_single_move + IR_SINGLE_MOVE_COUNT - 1u)
+                                  % IR_SINGLE_MOVE_COUNT);
+        menu_feedback(MENU_FB_DIR);
     }
 
     /* PE0 短按: 换方向(避开长按的开始/停止) */

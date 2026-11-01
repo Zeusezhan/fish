@@ -53,9 +53,21 @@
  *   2. 再加 Kd 把晃动压下去;
  *   3. 最后加一点点 Ki 消掉残余的稳态偏航。
  */
-#define YAW_KP_DEFAULT          (9.0f)     /* 比例: 误差 1 度给多少 RPM */
-#define YAW_KI_DEFAULT          (0.0f)     /* 积分: 单位 RPM/(度*秒) */
-#define YAW_KD_DEFAULT          (0.0f)     /* 微分: 阻尼, 作用于 gz */
+#define YAW_KP_DEFAULT          (5.5f)     /* 比例: 误差 1 度给多少 RPM */
+#define YAW_KI_DEFAULT          (2.5f)     /* 积分: 单位 RPM/(度*秒)
+                                            * 时间常数 Ti = Kp/Ki ≈ 2.2s(5.5/2.5),
+                                            * 比最短的直行段(3.3s)短, 段内能把起始
+                                            * 误差消掉约 78%(只剩 ~22%)。
+                                            * 误差 1 度时每拍加 0.05RPM(每秒 2.5RPM),
+                                            * 0.4s 攒够 1RPM、3.2s 攒到限幅 8RPM。
+                                            * ★ 积分从 1.2 提到 2.5 就是为了"段内收敛";
+                                            *   再往上调会更冲, 必须同时加大 Kd。 */
+#define YAW_KD_DEFAULT          (1.0f)    /* 微分: 阻尼, 作用于陀螺仪角速度 gz。
+                                            * 积分加快后阻尼变弱, 这一项负责压过冲:
+                                            * gz=20°/s 时抵 5RPM, 约等于 0.9° 的超前量。
+                                            * ★ 直接用 gz 做微分, 不自己差分航向角,
+                                            *   所以不会放大噪声。摆得厉害就加到 0.4,
+                                            *   响应发钝就降到 0.15。 */
 
 /* 控制周期(秒), 必须与 TIM3 的 20ms 一致 */
 #define YAW_DT_S                (0.02f)
@@ -68,8 +80,9 @@
 #define YAW_INT_MAX_RPM         (8.0f)
 #define YAW_INT_RESET_DEG       (8.0f)
 
-/* 输出限幅(RPM)。InertialRun 会通过 YawLoop_Enable 覆盖它。 */
-#define YAW_OUT_MAX_DEFAULT     (30.0f)
+/* 输出限幅(RPM) 已统一到 main.h 的 YAW_OUT_MAX_RPM,
+ * 和 InertialRun 每段 YawLoop_Enable() 传进来的值是同一个。
+ * 调这一项只改 main.h 那一处。 */
 
 /* IMU 掉线判据(ms): 超过这么久没有新的有效帧就判定掉线, 必须停车。
  * 50RPM 下 200ms 约跑 1.7cm, 再长就纯靠惯性了。 */
@@ -114,7 +127,7 @@ volatile float   g_yaw_kd = YAW_KD_DEFAULT;
 volatile float   g_yaw_output = 0.0f;
 
 /* 输出限幅(RPM), 由 YawLoop_Enable() 设定 */
-volatile float   g_yaw_out_max = YAW_OUT_MAX_DEFAULT;
+volatile float   g_yaw_out_max = YAW_OUT_MAX_RPM;
 
 /* 积分器(只在中断里累加) */
 static volatile float s_yaw_integral = 0.0f;
@@ -239,7 +252,7 @@ int main(void)
   (void)HAL_TIM_Base_Start_IT(&htim3);
 
   /* 上电即启用航向闭环, 以当前朝向作为目标, 无需等待状态机打开。 */
-  YawLoop_Enable(jy901s_data.yaw_continuous, YAW_OUT_MAX_DEFAULT);
+  YawLoop_Enable(jy901s_data.yaw_continuous, YAW_OUT_MAX_RPM);
 
   /* USER CODE END 2 */
 
@@ -342,7 +355,7 @@ void YawLoop_Enable(float target_deg, float out_max_rpm)
     g_yaw_output      = 0.0f;
     s_yaw_integral    = 0.0f;
     g_yaw_target      = target_deg;
-    g_yaw_out_max     = (out_max_rpm > 0.0f) ? out_max_rpm : YAW_OUT_MAX_DEFAULT;
+    g_yaw_out_max     = (out_max_rpm > 0.0f) ? out_max_rpm : YAW_OUT_MAX_RPM;
     g_yaw_loop_enable = 1u;
     __set_PRIMASK(primask);
 }
@@ -360,6 +373,24 @@ void YawLoop_Disable(void)
     g_yaw_loop_enable = 0u;
     g_yaw_output      = 0.0f;
     s_yaw_integral    = 0.0f;
+    __set_PRIMASK(primask);
+}
+
+/**
+  * @brief  只修改目标航向, 不动使能、限幅和积分
+  * @param  target_deg  新的目标航向(度)
+  * @note   给"横向位置外环"用(InertialRun): 外环每 20ms 把理想航向
+  *         叠加上横偏补偿量再下发。不能调用 YawLoop_Enable —— 那个会把
+  *         积分清零, 外环一跑起来积分就永远建立不起来。
+  *         g_yaw_target 是 32 位 float, 单次写入在 M4 上是原子的, 但这里
+  *         仍然关中断, 和 YawLoop_Enable 保持一致。
+  */
+void YawLoop_SetTarget(float target_deg)
+{
+    uint32_t primask = __get_PRIMASK();
+
+    __disable_irq();
+    g_yaw_target = target_deg;
     __set_PRIMASK(primask);
 }
 
