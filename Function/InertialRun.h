@@ -55,8 +55,9 @@
  *     - 每 20ms 读一次剩余角度, 按剩余量分档给自转速度
  *       (>10 度满速 / 5 度半速 / 近到位降到最低速压静摩擦)
  *     - 剩余角度进入 ±IR_TURN_TOL_DEG 就算到位, 立即停车
- *     - 超过 IR_TURN_TIMEOUT_MS 还没到位(被卡住/陀螺仪不跟)直接报错停机,
- *       绝不能让车一直原地打转
+ *     - 转向**没有超时保护**: 只认角度, 转不到位就一直转。
+ *       这是有意的 —— 超时停车会让车停在错误角度却继续跑下一段。
+ *       唯一的兜底是陀螺仪掉线(IMU LOST)立即停车。
  *
  * 【为什么要 VERIFY 这一步】
  *   停车命令只保证"发出去了", 不保证"驱动器收到了"。丢掉一帧就会出现
@@ -78,10 +79,10 @@
 
 /* 方向。
  *
- * ★ 横移(IR_MOVE_LEFT)只保留"左移"一个方向, 且不进单段调试的轮换表:
- *   它只用于自动跑图里"段 4 右转之后补一小段左移"的位置微调(0.2s 量级),
+ * ★ 横移(IR_MOVE_LEFT / IR_MOVE_RIGHT)不进单段调试的轮换表:
+ *   它们只用于自动跑图里"转向之前补一小段横移"的位置微调(0.x s 量级),
  *   不是用来跑整段的。横移时麦轮辊子侧向滚动、抓地力只有纵向的约七成,
- *   长距离左移闭环压不住(见 InertialRun.c 文件头), 所以别拿它当主运动。
+ *   长距离横移闭环压不住(见 InertialRun.c 文件头), 所以别拿它当主运动。
  *
  * ★ 枚举下标必须和 InertialRun_MoveName() 的名字表逐项对齐, 也决定了
  *   单段调试的轮换顺序(见 IR_SINGLE_MOVE_COUNT)。 */
@@ -91,13 +92,14 @@ typedef enum
     IR_MOVE_BACK,           /* 后退(仅单段调试) */
     IR_MOVE_TURN_L,         /* 原地左转 90 度(自动路径 + 单段调试) */
     IR_MOVE_TURN_R,         /* 原地右转 90 度(自动路径 + 单段调试) */
-    IR_MOVE_LEFT,           /* 左移(横移), 仅段 4 之后的短距离微调 */
+    IR_MOVE_LEFT,           /* 左移(横移), 路径微调用 */
+    IR_MOVE_RIGHT,          /* 右移(横移), 路径微调用 */
     IR_MOVE_COUNT
 } InertialMove_t;
 
 /* 单段调试可选的动作个数: FWD / BACK / TURN_L / TURN_R。
- * IR_MOVE_LEFT 是自动路径专用的短距离微调段, 不进这个轮换表
- * (它必须排在枚举最后, 否则这里的计数会把它算进去)。 */
+ * IR_MOVE_LEFT / IR_MOVE_RIGHT 是自动路径专用的短距离微调段, 不进这个
+ * 轮换表(它们必须排在枚举最后, 否则这里的计数会把它们算进去)。 */
 #define IR_SINGLE_MOVE_COUNT    ((uint8_t)IR_MOVE_LEFT)
 
 /* 单段调试"转向"动作的固定转角(度)。和自动跑图一样是 90 度闭环,
@@ -135,6 +137,7 @@ typedef struct
     uint16_t    duration_ms;    /* 本段时长; 转向段这里是超时上限 */
     uint32_t    elapsed_ms;     /* 本段已运行时长 */
     float       turn_remain_deg;/* 转向中: 还差多少度(正=还要往左转), 其余状态为 0 */
+    uint8_t     turn_yaw_hold;  /* 转向中: 1 = 本拍航向被判为跳变, 正在用 gz 外推 */
     int32_t     position[IR_MOTOR_NUM];
     uint8_t     position_valid[IR_MOTOR_NUM];
     const char *status;         /* 内部阶段名, 4~8 字符 */
@@ -172,7 +175,7 @@ void InertialRun_GetInfo(IrInfo_t *info);
 /* 状态名: "IDLE"/"ZERO"/"WAIT"/"RUN"/"TURN"/"STOP"/"VERIFY" */
 const char *InertialRun_StateName(IrState_t state);
 
-/* 方向名: "FWD" / "BACK" / "TURN_L" / "TURN_R" / "LEFT" */
+/* 方向名: "FWD" / "BACK" / "TURN_L" / "TURN_R" / "LEFT" / "RIGHT" */
 const char *InertialRun_MoveName(uint8_t move);
 
 #endif /* __INERTIAL_RUN_H */

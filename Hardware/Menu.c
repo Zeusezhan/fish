@@ -234,10 +234,13 @@ static void menu_draw_run_head(const IrInfo_t *info, uint8_t single)
     if ((info->running != 0u) && (info->state == IR_TURNING))
     {
         /* 转向中: 剩余角度比剩余时间有用得多 —— 转向是闭环到角度,
-         * 时间只用来判断"是不是卡住了" */
-        (void)snprintf(line, sizeof(line), "REM:%5.1f Y:%5.1f",
+         * 时间只用来判断"是不是卡住了"。
+         * 末位 H 表示本拍航向被判为跳变、正在用 gz 外推(见
+         * IR_YAW_JUMP_LIMIT_DEG)。调试时看到它闪, 就说明抑制器在干活。 */
+        (void)snprintf(line, sizeof(line), "REM:%5.1f Y:%5.1f%c",
                        (double)info->turn_remain_deg,
-                       (double)jy901s_data.yaw);
+                       (double)jy901s_data.yaw,
+                       (info->turn_yaw_hold != 0u) ? 'H' : ' ');
     }
     else if (info->running != 0u)
     {
