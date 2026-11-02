@@ -81,7 +81,7 @@
  *                 比多转一会儿更危险。 */
 #define IR_TURN_RPM             40
 #define IR_TURN_MIN_RPM         8
-#define IR_TURN_TOL_DEG         0.5f
+#define IR_TURN_TOL_DEG         1.0f
 
 /* 转向"提前停"补偿(度)。
  *
@@ -110,22 +110,23 @@
  *   车就按这个假目标继续转 —— 表现是"该转 90 度, 却转到了 260 度"。
  *
  * 【为什么能判出来】
- *   转向时真实角速度最多 IR_TURN_RPM 对应的 240°/s, 控制拍是 20ms,
- *   每拍真跳最多约 5 度。留足余量取 60 度: 超过 60 度的单拍变化不可能是
- *   真转动, 只能是坏数据。
+ *   gz 是陀螺角速度, 几乎不受磁场影响。用"上一拍好值 + gz*dt"外推出
+ *   本拍航向应该在哪, 再和实测 yaw_continuous 比偏差。正常转向时两者
+ *   只差 1~2 度; 磁干扰会让实测偏离外推值几十度, 偏差一下就超门限。
  *
  * 【怎么处理】
- *   丢弃这一拍**不直接丢弃**: 用上一拍的好值 + gz 积分补一小段(最多
- *   IR_YAW_HOLD_MAX_MS), 让闭环既不跳变、也不至于在坏数据期间"冻结
- *   不动"。gz 满量程 ±2000°/s, 受磁场影响比 yaw 小得多, 短时间外推是可靠的。
- *   连续坏数据超过 IR_YAW_HOLD_MAX_MS 就不再外推(保持最后好值),
- *   交给"IMU 掉线/超时"保护收场, 不让它无穷积分。
+ *   偏差超门限就用外推值顶替, 并且把基准也推进到外推值 —— 基准始终
+ *   跟着陀螺走, 坏数据一结束, 下一拍"外推 vs 实测"又能自动重新同步,
+ *   不会锁死。老实现是"保持最后好值", 基准冻结, 车真实转过的角度会让
+ *   它永远被当成坏数据, 于是闭环看不到真实角度, 一直转不停。
+ *   两次调用间隔超过 IR_YAW_HOLD_MAX_MS(主循环被别的事拖住)时,
+ *   外推已不可靠, 直接采信当前值重新建立基准。
  *
  * 【作用范围】
  *   只在 IR_TURNING 状态生效。直行段、启动采样都不受影响 —— 那些地方
  *   单拍真变化本来就小, 加了抑制反而可能吞掉正常的航向更新。 */
-#define IR_YAW_JUMP_LIMIT_DEG   60.0f
-#define IR_YAW_HOLD_MAX_MS      100u    /* 最多外推这么久, 约 5 个控制拍 */
+#define IR_YAW_JUMP_LIMIT_DEG   15.0f
+#define IR_YAW_HOLD_MAX_MS      100u    /* 两次取样间隔上限, 超过就重采样 */
 
 /* ==================== 横向位置外环(横偏补偿) ====================
  *
@@ -244,21 +245,24 @@ static const IrPathSeg_t k_auto_path[] =
 {
     { IR_MOVE_FWD,      3400u },//直行
     { IR_MOVE_TURN_L,   0u    },     
+	
     { IR_MOVE_FWD,      3100u },//直行
     { IR_MOVE_RIGHT,    600u  },//右移     
     { IR_MOVE_TURN_R,   0u    },     
-    { IR_MOVE_LEFT,     1310u },//左移     
-    { IR_MOVE_FWD,      5100u },//直行
+    { IR_MOVE_LEFT,     1305u },//左移     
+    { IR_MOVE_FWD,      5000u },//直行
 //    { IR_MOVE_BACK,     400u  },     /* 段3 之后: 后移 0.6s */
 //    { IR_MOVE_FWD,      800u  },     /* 段3 之后: 前进 0.3s */
     { IR_MOVE_TURN_L,   0u    },     
-	{ IR_MOVE_RIGHT,    600u  }, //右移
-    { IR_MOVE_FWD,      4400u },//直行
-	{ IR_MOVE_RIGHT,    800u  },//右移
+	{ IR_MOVE_RIGHT,    440u  }, //右移
+    { IR_MOVE_FWD,      4200u },//直行
+	{ IR_MOVE_RIGHT,    400u  },
+	 { IR_MOVE_FWD,     650u },//直行
+	{ IR_MOVE_RIGHT,    300u  },//右移
     { IR_MOVE_TURN_R,   0u    },     
-    { IR_MOVE_FWD,      4700u },//直行
+    { IR_MOVE_FWD,      4650u },//直行
     { IR_MOVE_TURN_R,   0u    },     /* 段5 之后: 右转 90 */
-	{ IR_MOVE_LEFT,     500u  },//左移
+//	{ IR_MOVE_LEFT,     500u  },//左移
 };
 
 #define IR_AUTO_SEG_NUM ((uint8_t)(sizeof(k_auto_path) / sizeof(k_auto_path[0])))
@@ -459,18 +463,21 @@ static float ir_turn_target_from(uint8_t move, float start)
 }
 
 /**
-  * @brief  取一个"可信"的转向航向, 把单拍跳变挡在外面
+  * @brief  取一个"可信"的转向航向, 把磁干扰造成的跳变挡在外面
   * @retval 用于闭环计算的航向(度)
   * @note   只在 IR_TURNING 阶段有意义的取样方式, 见 IR_YAW_JUMP_LIMIT_DEG。
-  *         判定为坏数据时, 用上一拍好值 + gz 积分外推, 外推时长不超过
-  *         IR_YAW_HOLD_MAX_MS; 超出后保持最后好值, 让超时保护去收场。
+  *         用 gz 积分外推做交叉校验: 实测偏离外推值超过门限时用外推值
+  *         顶替, 并且基准跟着外推值走 —— 坏数据结束后自动重新同步,
+  *         不会锁死。
   */
 static float ir_turn_yaw_now(void)
 {
     float    now_yaw = jy901s_data.yaw_continuous;
     uint32_t now     = HAL_GetTick();
+    uint32_t dt_ms;
     float    dt_s;
-    float    est;
+    float    pred;
+    float    dev;
 
     if (s_yaw_good_tick == 0u)
     {
@@ -481,11 +488,11 @@ static float ir_turn_yaw_now(void)
         return now_yaw;
     }
 
-    dt_s = (float)(uint32_t)(now - s_yaw_good_tick) * 0.001f;
+    dt_ms = (uint32_t)(now - s_yaw_good_tick);
 
-    /* 正常情况: 单拍变化在门限内, 直接采信并刷新基准 */
-    if ((now_yaw - s_yaw_good <= IR_YAW_JUMP_LIMIT_DEG)
-        && (now_yaw - s_yaw_good >= -IR_YAW_JUMP_LIMIT_DEG))
+    /* 两次取样间隔太久(主循环被 OLED/无线等拖住), gz 外推不再可靠,
+     * 直接重新建立基准, 而不是硬往外推。 */
+    if (dt_ms > IR_YAW_HOLD_MAX_MS)
     {
         s_yaw_good      = now_yaw;
         s_yaw_good_tick = now;
@@ -493,27 +500,29 @@ static float ir_turn_yaw_now(void)
         return now_yaw;
     }
 
-    /* 跳变: 用 gz 外推顶着。gz 是 deg/s, 左转为正, 和航向同号。
-     * 外推上限 IR_YAW_HOLD_MAX_MS, 防止坏数据期间积分跑飞。 */
-    s_yaw_hold = 1u;
+    dt_s = (float)dt_ms * 0.001f;
 
-    if ((uint32_t)(now - s_yaw_good_tick) > IR_YAW_HOLD_MAX_MS)
+    /* 用陀螺角速度外推"这一拍航向应该在哪"。gz 是 deg/s, 左转为正,
+     * 和航向同号。 */
+    pred = s_yaw_good + jy901s_data.gz * dt_s;
+    dev  = now_yaw - pred;
+
+    if ((dev <= IR_YAW_JUMP_LIMIT_DEG) && (dev >= -IR_YAW_JUMP_LIMIT_DEG))
     {
-        dt_s = (float)IR_YAW_HOLD_MAX_MS * 0.001f;
+        /* 实测与外推吻合: 采信实测并刷新基准 */
+        s_yaw_good      = now_yaw;
+        s_yaw_good_tick = now;
+        s_yaw_hold      = 0u;
+        return now_yaw;
     }
 
-    est = s_yaw_good + jy901s_data.gz * dt_s;
-
-    /* 外推值本身也要过一遍门限, 免得 dt 抖动时又给出一个离谱值 */
-    if ((est - s_yaw_good > IR_YAW_JUMP_LIMIT_DEG)
-        || (est - s_yaw_good < -IR_YAW_JUMP_LIMIT_DEG))
-    {
-        float lim = (est > s_yaw_good) ? IR_YAW_JUMP_LIMIT_DEG
-                                       : -IR_YAW_JUMP_LIMIT_DEG;
-        est = s_yaw_good + lim;
-    }
-
-    return est;
+    /* 实测偏离外推太多: 这一拍 yaw 被磁干扰污染, 用外推值顶替。
+     * ★ 基准同时推进到外推值 —— 基准跟着陀螺走, 坏数据一结束下一拍
+     *   就能重新同步, 不会出现"基准冻结 → 永远被判坏数据 → 一直转"。 */
+    s_yaw_hold      = 1u;
+    s_yaw_good      = pred;
+    s_yaw_good_tick = now;
+    return pred;
 }
 
 /**
@@ -523,7 +532,7 @@ static float ir_turn_yaw_now(void)
   */
 static void ir_apply_turn(void)
 {
-    float remain = g_yaw_target - ir_turn_yaw_now();
+    float remain = s_turn_target - ir_turn_yaw_now();
     int16_t rpm;
 
     /* 误差 10 度以上给满转; 10 度以内按比例降速(5 度约半速);
@@ -1112,9 +1121,11 @@ void InertialRun_Task(void)
                     s_turn_pending = 0u;
                 }
 
-                /* 目标角就是本段的绝对航向(理想角), 直接闭环过去。
-                 * 这里不能用 s_home_yaw: 转向的目的就是离开当前朝向。 */
-                YawLoop_Enable(s_turn_target, YAW_OUT_MAX_RPM);
+                /* 目标角就是本段的绝对航向(理想角)。转向期间的转速由
+                 * ir_apply_turn() 按 s_turn_target 直接分档给出, 不走
+                 * 航向环: 关掉闭环, 只把目标写进 g_yaw_target 供遥测显示。 */
+                YawLoop_Disable();
+                YawLoop_SetTarget(s_turn_target);
 
                 /* 跳变抑制器重新建立基准: 停了一整段 + 倒计时, 上一段
                  * 留下的 s_yaw_good 已经过期, 不能拿来当"上一拍好值"。
